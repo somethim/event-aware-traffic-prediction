@@ -36,16 +36,33 @@ event-driven congestion.
 
 ## Data
 
-The pipeline runs end-to-end **today** on a synthetic PeMS-style dataset that the
-generator creates for you (traffic *flow* per sensor per timestamp, plus a table
-of planned events). The synthetic generator injects a known, ground-truth event
-effect into the flow, so there is a real signal for Model B to learn and for the
-comparison to reveal.
+`data.source` selects the dataset (both write the same parquet schema, so the pipeline is
+source-agnostic):
 
-To move to **real data** later (thesis "real-world data" requirement):
-- Traffic: swap in **PEMS-BAY / PeMS** flow data (see `src/data/load.py`).
-- Events: implement the scraper in `src/data/scrape_events.py` (Ticketmaster
-  Discovery API, or scrape a local events/venue calendar for your metro).
+- **`real`** (default) — **Caltrans PeMS** loop-detector flow + **setlist.fm** historical
+  concerts, i.e. the thesis's "real-world data".
+  - **PeMS** (`src/data/pems.py`): the raw 5-min data (~2.7 GB) is published on Google Drive and
+    **auto-downloaded** (via `gdown`) into `data/raw/pems/` when missing — it is not kept in the
+    repo. The loader reads flow/speed/occupancy + `%Observed`, drops imputed bins, and
+    `data.target` picks which of flow/speed/occupancy the model predicts.
+  - **setlist.fm** (`src/data/setlistfm.py`): a free, *historical* concert API (so it can cover a
+    past PeMS window). It gives date-only + city-level coords + no capacity, so a **venue
+    reference table** supplies each major LA/SF venue's precise `(lat, lon, capacity)` and a
+    default local start hour (20:00). Venue **capacity** is the popularity signal; concerts at
+    unlisted venues are dropped. Start times are on PeMS's Pacific-local clock, so events line up
+    with the flow timestamps.
+  - Build/refresh it explicitly with `uv run python -m scripts.build_real_dataset` (needs
+    `SETLISTFM_API_KEY` in `.env`); the runners also build it once if missing.
+- **`synthetic`** (opt-in) — the generator in `src/data/generate_synthetic.py` fabricates
+  PeMS-style flow with a **known, ground-truth event effect** injected. Useful as a *controlled
+  testbed* (a model blind to events cannot explain the injected spikes) and for the offline
+  tests. Set `data.source: synthetic` to use it.
+
+> **Live deployment (out of scope, future work).** A real-time system would pair an upcoming-event
+> feed (e.g. Ticketmaster Discovery API) with a *live* traffic feed. There is no free live
+> equivalent of PeMS per-sensor flow: Google Maps only exposes travel time in traffic (Routes API,
+> paid), and TomTom/HERE offer real-time segment speed on freemium tiers. This project is
+> therefore an **offline historical study**; live inference is left as future work.
 
 ## Quickstart
 
@@ -56,22 +73,37 @@ uv fetches it automatically.
 # 1. install deps into a managed venv
 uv sync --extra dev
 
-# 2. run the whole thing (generate data -> train A, B, A+ -> compare)
-uv run python -m scripts.run_all
-# ...or step by step:
-uv run python -m src.data.generate_synthetic     # writes data/synthetic/*.parquet
+# 2. build the dataset (real by default: auto-fetches PeMS from Drive + setlist.fm events)
+uv run python -m scripts.build_real_dataset      # needs SETLISTFM_API_KEY in .env
+#    (or use the controlled synthetic testbed instead: set data.source: synthetic in config)
+
+# 3. run EVERYTHING: experiment matrix (all models × conditions) + headline pipeline + figures
+uv run python -m scripts.run_all         # heavy (several min); fills docs/thesis-notes.md + media/
+# ...or the individual pieces:
 uv run python -m src.pipeline.prepare            # cached feature matrix
 uv run python -m src.pipeline.train_baseline     # Model A
 uv run python -m src.pipeline.train_event_model  # Model B  (writes event_impact_score)
 uv run python -m src.pipeline.train_event_aware  # Model A+
-uv run python -m src.pipeline.compare            # metrics + plots -> results/
+uv run python -m src.pipeline.compare            # metrics + plots -> media/
 
 # benchmark EVERY model (RF, GB, XGBoost, ...) — each run as A and A+ — and compare
-uv run python -m scripts.run_benchmark           # -> results/benchmark.json + benchmark.png
+uv run python -m scripts.run_benchmark           # -> media/results/benchmark.json + media/figures/
+
+# statistical rigor: rolling-origin CV x seeds + significance test on the A->A+ gap
+uv run python -m scripts.run_stats               # -> media/results/stats.json
+
+# generate all thesis figures (matplotlib) into media/figures/
+uv run python -m scripts.run_visuals
+
+# run the full experiment matrix (split × normalize × model) -> table in docs/thesis-notes.md
+uv run python -m scripts.run_experiments
 
 # tests
 uv run pytest
 ```
+
+Outputs land under **`media/`**: metrics JSON in `media/results/`, PNG figures in
+`media/figures/`. (`data/` holds only inputs + intermediate parquet; both are gitignored.)
 
 ### Models & GPU
 
@@ -91,12 +123,12 @@ show the CPU-vs-GPU trade-off, which feeds the thesis's *response time* criterio
 
 The **benchmark** (`scripts.run_benchmark`) trains every model listed under
 `benchmark.models` in the config as both A and A+, then prints one comparison table and
-writes `results/benchmark.json` + `results/benchmark.png`. Add a model type to that list
+writes `media/results/benchmark.json` + `media/figures/benchmark.png`. Add a model type to that list
 and it joins the comparison automatically. Data prep and Model B run once (they don't
 depend on the traffic model), so only runs A/A+ repeat per model.
 
-Optional extras: `uv sync --extra scrape` (event scraper deps),
-`uv sync --extra boosting` (xgboost/lightgbm).
+Optional extras: `uv sync --extra scrape` (setlist.fm event fetch deps),
+`uv sync --extra boosting` (lightgbm; xgboost is already a core dependency).
 
 ### Development tooling
 
@@ -106,23 +138,31 @@ uv run mypy                        # static type check (src, scripts, tests)
 uv run pytest                      # smoke tests
 ```
 
-Config lives in `pyproject.toml` (`[tool.black]`, `[tool.mypy]`). Note: `pytest`
-regenerates a small synthetic dataset into `data/`, so run `scripts.run_all`
-afterwards to restore the full dataset (all data is synthetic and gitignored).
+**Everything in one line** (format → type-check → test → run the full matrix + figures):
 
-Outputs land in `results/` (`metrics.json`, comparison plots) and trained models
+```bash
+uv run black src scripts tests && uv run mypy && uv run pytest && uv run python -m scripts.run_all
+```
+
+Config lives in `pyproject.toml` (`[tool.black]`, `[tool.mypy]`). The tests run on a small
+synthetic dataset written to an isolated temp directory (`tests/conftest.py` points
+`EATP_DATA_ROOT` there), so running `pytest` never touches your real `data/` — you can run it
+mid-experiment safely.
+
+Outputs land in `media/` (`results/metrics.json`, figures in `figures/`) and trained models
 in `models/`.
 
 ## Layout
 
 ```
 config/config.yaml          all knobs (data size, model type, features)
-src/data/                   synthetic generation, real-data loaders, event scraper (stub)
+src/data/                   PeMS + setlist.fm loaders, Drive fetch/build, synthetic generator
 src/features/               feature engineering (temporal, lags, event exposure)
 src/models/                 traffic model, event-impact model, metrics
 src/pipeline/               train A / B / A+  and  compare
 scripts/run_all.py          one-shot runner
-results/                    metrics + figures for the thesis
+media/results/             metrics JSON
+media/figures/             generated figures
 ```
 
 ## Thesis evaluation criteria (from the abstract)

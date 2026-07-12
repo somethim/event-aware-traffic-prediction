@@ -1,8 +1,7 @@
-"""Compare run A (baseline) vs run A+ (event-aware) — the core thesis result.
+"""Compare run A (baseline) against run A+ (event-aware), the core thesis result.
 
-Reports accuracy/reliability/response-time for both, OVERALL and on the subset of rows
-that are actually event-affected (where the hypothesis predicts the biggest gain). Writes
-results/metrics.json and two figures.
+Reports metrics for both runs overall and on the event-affected subset, where the hypothesis
+predicts the biggest gain. Writes results/metrics.json and two figures.
 """
 
 from __future__ import annotations
@@ -11,11 +10,11 @@ import json
 
 import matplotlib
 
-matplotlib.use("Agg")  # headless / no display needed
+matplotlib.use("Agg")  # headless, no display needed
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from ..config import CFG, RESULTS_DIR
+from ..config import CFG, FIGURES_DIR, RESULTS_DIR, target_column, target_units
 from ..models.metrics import regression_metrics
 from .train_baseline import PRED_FILE as PRED_A
 from .train_event_aware import PRED_FILE as PRED_A_PLUS
@@ -23,16 +22,16 @@ from .train_event_aware import PRED_FILE as PRED_A_PLUS
 EVENT_EFFECT_THRESHOLD = 0.05  # a row is "event-affected" if true uplift exceeds this
 
 
-def _load_merged() -> pd.DataFrame:
+def load_merged() -> pd.DataFrame:
     a = pd.read_parquet(PRED_A)
     b = pd.read_parquet(PRED_A_PLUS)[["sensor_id", "timestamp", "event_aware_pred"]]
     return a.merge(b, on=["sensor_id", "timestamp"], how="inner")
 
 
-def _block(df: pd.DataFrame) -> dict:
+def _block(df: pd.DataFrame, y: str) -> dict:
     return {
-        "baseline_A": regression_metrics(df["flow"], df["baseline_pred"]),
-        "event_aware_A_plus": regression_metrics(df["flow"], df["event_aware_pred"]),
+        "baseline_A": regression_metrics(df[y], df["baseline_pred"]),
+        "event_aware_A_plus": regression_metrics(df[y], df["event_aware_pred"]),
     }
 
 
@@ -40,17 +39,27 @@ def _improvement(a: dict, b: dict) -> dict:
     return {k: round(100 * (a[k] - b[k]) / a[k], 2) for k in ("MAE", "RMSE", "MAPE") if a[k] != 0}
 
 
+def _event_affected(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows where an event is influencing traffic. Uses the synthetic ground truth when present,
+    otherwise falls back to being inside an event window, which also works for real data."""
+    if "true_event_effect" in df.columns:
+        return df[df["true_event_effect"] > EVENT_EFFECT_THRESHOLD]
+    return df[df["in_event_window"] == 1]
+
+
 def compute_results(cfg: dict) -> dict:
     """A-vs-A+ metrics for the current run's prediction files (no plotting/side effects).
 
     Reused by the multi-model benchmark, which calls this once per model type.
     """
-    df = _load_merged()
-    affected = df[df["true_event_effect"] > EVENT_EFFECT_THRESHOLD]
-    overall = _block(df)
-    event_only = _block(affected)
+    y = target_column(cfg)
+    df = load_merged()
+    affected = _event_affected(df)
+    overall = _block(df, y)
+    event_only = _block(affected, y)
     return {
         "model_type": cfg["model"]["type"],
+        "target": y,
         "n_test_rows": int(len(df)),
         "n_event_affected_rows": int(len(affected)),
         "overall": overall,
@@ -73,8 +82,8 @@ def main(cfg: dict | None = None) -> dict:
     out = RESULTS_DIR / "metrics.json"
     out.write_text(json.dumps(results, indent=2))
 
-    _plot_bars(overall, event_only)
-    _plot_event_window(_load_merged())
+    _plot_bars(overall, event_only, target_units(cfg))
+    _plot_event_window(load_merged())
 
     print("\n=== A vs A+ ===")
     print(
@@ -95,7 +104,7 @@ def main(cfg: dict | None = None) -> dict:
     return results
 
 
-def _plot_bars(overall: dict, event_only: dict) -> None:
+def _plot_bars(overall: dict, event_only: dict, units: str = "veh/interval") -> None:
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
     for ax, block, title in (
         (axes[0], overall, "Overall test set"),
@@ -119,22 +128,22 @@ def _plot_bars(overall: dict, event_only: dict) -> None:
         ax.set_xticks([0, 1])
         ax.set_xticklabels(["MAE", "RMSE"])
         ax.set_title(title)
-        ax.set_ylabel("error (veh/h)")
+        ax.set_ylabel(f"error ({units})")
         ax.legend()
     fig.suptitle("Baseline vs Event-Aware traffic prediction")
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "comparison_bars.png", dpi=130)
+    fig.savefig(FIGURES_DIR / "comparison_bars.png", dpi=130)
     plt.close(fig)
 
 
 def _plot_event_window(df: pd.DataFrame) -> None:
     """Time series for the single sensor with the largest event effect in the test set."""
-    if df["true_event_effect"].max() <= 0:
+    if "true_event_effect" not in df.columns or df["true_event_effect"].max() <= 0:
         return
     sid = int(df["sensor_id"].to_numpy()[df["true_event_effect"].to_numpy().argmax()])
     s = df[df["sensor_id"] == sid].sort_values("timestamp").reset_index(drop=True)
     peak_pos = int(s["true_event_effect"].to_numpy().argmax())
-    peak = pd.Timestamp(s["timestamp"].to_numpy()[peak_pos])  # datetime64 -> clean Timestamp
+    peak = pd.Timestamp(s["timestamp"].to_numpy()[peak_pos])
     win = s[
         (s["timestamp"] >= peak - pd.Timedelta(hours=24))
         & (s["timestamp"] <= peak + pd.Timedelta(hours=24))
@@ -152,7 +161,7 @@ def _plot_event_window(df: pd.DataFrame) -> None:
     ax.legend()
     fig.autofmt_xdate()
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "event_window_sensor.png", dpi=130)
+    fig.savefig(FIGURES_DIR / "event_window_sensor.png", dpi=130)
     plt.close(fig)
 
 

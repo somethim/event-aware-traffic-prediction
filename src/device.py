@@ -1,8 +1,8 @@
 """GPU/CPU device detection for GPU-capable models (XGBoost).
 
-sklearn's RandomForest/GradientBoosting are CPU-only, so this only matters when
-`model.type = xgboost`. XGBoost 2.x takes a single `device` string ("cuda" / "cpu"); we
-resolve it here from the config preference, auto-detecting a usable NVIDIA GPU.
+sklearn's RandomForest and GradientBoosting are CPU-only, so this only matters when
+`model.type = xgboost`. XGBoost 2.x takes a single `device` string of "cuda" or "cpu",
+resolved here from the config preference and auto-detecting a usable NVIDIA GPU.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ def cuda_available() -> bool:
 def resolve_device(preference: str = "auto") -> str:
     """Map a config preference to an XGBoost device string.
 
-    "cpu" -> "cpu"; "cuda"/"gpu" -> "cuda" (forced); "auto" -> "cuda" if a GPU is
-    detected else "cpu".
+    "cpu" stays on CPU, "cuda" or "gpu" forces CUDA, and "auto" picks CUDA when a GPU is
+    detected and CPU otherwise.
     """
     pref = preference.lower()
     if pref == "cpu":

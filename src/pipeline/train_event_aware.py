@@ -1,7 +1,7 @@
-"""Run A+ — event-aware traffic model.
+"""Run A+, the event-aware traffic model.
 
-Identical model type to run A, identical traffic features, PLUS the single extra feature
-`event_impact_score` produced by Model B. Requires train_event_model to have run first.
+Same model and traffic features as run A, plus the single extra `event_impact_score`
+feature produced by Model B. Requires train_event_model to have run first.
 """
 
 from __future__ import annotations

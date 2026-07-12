@@ -1,13 +1,8 @@
-"""Multi-model benchmark: run A and A+ for EVERY model in config's benchmark.models,
-then compare them all in one table + chart.
+"""Multi-model benchmark. Runs A and A+ for every model in config's benchmark.models and
+compares them in one table and chart, recording accuracy and inference latency for each.
 
-For each model type (random_forest, gradient_boosting, xgboost, ...):
-  * run A  (baseline traffic features)
-  * run A+ (baseline + Model B's event score)
-  * record accuracy (A vs A+) and inference latency
-
-Data prep and Model B run ONCE up front — they don't depend on the traffic model type
-(the event-impact score is the same regardless), so only runs A/A+ repeat per model.
+Data prep and Model B run once up front. The event-impact score does not depend on the
+traffic model type, so only runs A and A+ repeat per model.
 
     uv run python -m scripts.run_benchmark      # or: python -m src.pipeline.benchmark
 
@@ -24,8 +19,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from ..config import CFG, FLOW_FILE, RESULTS_DIR
-from ..data.generate_synthetic import generate
+from ..config import CFG, FIGURES_DIR, RESULTS_DIR
+from ..data.build_real import ensure_dataset
 from . import compare, prepare, train_baseline, train_event_aware, train_event_model
 
 DEFAULT_MODELS = ["random_forest", "gradient_boosting", "xgboost"]
@@ -35,10 +30,7 @@ def run(cfg: dict | None = None) -> dict:
     cfg = cfg or CFG
     models = cfg.get("benchmark", {}).get("models", DEFAULT_MODELS)
 
-    # One-time setup shared by every model.
-    if not FLOW_FILE.exists():
-        print("== generating synthetic data ==")
-        generate(cfg)
+    ensure_dataset(cfg)
     print("== preparing features ==")
     prepare.prepare(cfg)
     print("== training Model B (event impact, shared) ==")
@@ -49,8 +41,8 @@ def run(cfg: dict | None = None) -> dict:
         print(f"\n===== model: {mtype} =====")
         c = copy.deepcopy(cfg)
         c["model"]["type"] = mtype
-        m_a = train_baseline.main(c)  # run A  (writes pred_A)
-        m_ap = train_event_aware.main(c)  # run A+ (writes pred_A+)
+        m_a = train_baseline.main(c)
+        m_ap = train_event_aware.main(c)
         comparison = compare.compute_results(c)
         results[mtype] = {
             "comparison": comparison,
@@ -73,7 +65,7 @@ def _row(model: str, r: dict) -> tuple:
     ap_evt = c["event_affected_only"]["event_aware_A_plus"]["MAE"]
     imp_over = c["improvement_pct_overall"].get("MAE", 0.0)
     imp_evt = c["improvement_pct_event_affected"].get("MAE", 0.0)
-    return (model, a_over, ap_over, imp_over, a_evt, ap_evt, imp_evt, r["latency_A_ms_per_1k"])
+    return model, a_over, ap_over, imp_over, a_evt, ap_evt, imp_evt, r["latency_A_ms_per_1k"]
 
 
 def _print_table(results: dict) -> None:
@@ -116,7 +108,7 @@ def _plot(results: dict) -> None:
     ax.set_title("Event-affected accuracy: baseline vs event-aware, per model")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(RESULTS_DIR / "benchmark.png", dpi=130)
+    fig.savefig(FIGURES_DIR / "benchmark.png", dpi=130)
     plt.close(fig)
 
 

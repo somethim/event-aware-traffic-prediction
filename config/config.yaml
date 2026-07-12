@@ -2,29 +2,84 @@ seed: 42
 
 data:
   # Synthetic dataset shape (PeMS-style: traffic FLOW per sensor per timestamp).
-  n_sensors: 30
   n_days: 90
   freq: "15min"                 # pandas offset alias (1h = hourly). Use "15min" for finer.
   start_date: "2025-01-01"
-  n_events: 120
-  # Bounding box for sensor & event locations (roughly LA metro, but arbitrary).
-  area:
-    lat_min: 34.00
-    lat_max: 34.20
-    lon_min: -118.35
-    lon_max: -118.10
-  raw_dir: "data/synthetic"
-  processed_dir: "data/processed"
+  # Prediction target (the quantity the traffic model learns). PeMS provides all three;
+  # synthetic data only has "flow", so keep "flow" unless running on real data.
+  #   flow       -> vehicles per interval (default; matches the abstract's framing)
+  #   speed      -> mean speed (mph); the classic travel-time / congestion proxy
+  #   occupancy  -> lane occupancy fraction; monotonic with congestion (no gridlock dip)
+  target: "flow"                 # "flow" | "speed" | "occupancy"
+  # Which dataset the pipeline runs on:
+  #   real      -> Caltrans PeMS (auto-fetched from Google Drive) + setlist.fm events (default)
+  #   synthetic -> the generator in src/data/generate_synthetic.py (opt-in; controlled testbed
+  #                with a KNOWN ground-truth event effect, useful for validation/tests)
+  source: "real"                 # "real" | "synthetic"
+  # Two cities so the cross-city (LA -> SF) split is possible. Different base_flow ranges
+  # (LA busier than SF) make per-sensor normalization actually matter. Coordinates are the
+  # real LA / SF metros so this maps cleanly onto real PeMS D7 / D4 data later.
+  cities:
+    - name: "LA"
+      n_sensors: 20
+      n_events: 80
+      base_flow: [300, 1400]
+      area: {lat_min: 34.00, lat_max: 34.20, lon_min: -118.35, lon_max: -118.10}
+    - name: "SF"
+      n_sensors: 15
+      n_events: 60
+      base_flow: [150, 900]
+      area: {lat_min: 37.70, lat_max: 37.85, lon_min: -122.48, lon_max: -122.38}
+  inputs_dir: "data/processed_inputs"   # flow/events/sensors parquet the pipeline reads
+  processed_dir: "data/processed"       # cached feature matrix (dataset.parquet)
+  # Real-data build (scripts.build_real_dataset): PeMS flow (Google Drive) + setlist.fm events.
+  real:
+    # Raw PeMS 5-min data (~2.7 GB) is auto-downloaded from Google Drive when missing, so it
+    # isn't kept in the repo. A single archive is preferred: Google rate-limits the per-file
+    # folder download once it has served many files, whereas one archive is a single request.
+    # Point gdrive_archive_url at a single .zip / .tar.gz / .tar.xz of the {4,7} directories
+    # (paste the file's share link once it's uploaded). Leave empty to fall back to the flakier
+    # per-file folder download below.
+    gdrive_archive_url: "https://drive.google.com/file/d/1_XDB1xAqcZmLOO6AoP6-71cjQdyDAv_S/view?usp=sharing"
+    gdrive_folder_url: "https://drive.google.com/drive/folders/185pO7uEMj22rbCE69SsQ7C5Ef5WP_XnK"
+    pems_root: "data/raw/pems"  # the Drive folder's {4,7} subdirs land here
+    pems_dirs:
+      LA: "data/raw/pems/7"     # Caltrans District 7 (Los Angeles)
+      SF: "data/raw/pems/4"     # Caltrans District 4 (SF Bay Area)
+    # PeMS timestamps are Pacific-local wall-clock (naive). This is the canonical clock;
+    # setlist.fm event start times are already local wall-clock (date-only + assumed hour).
+    timezone: "America/Los_Angeles"
+    station_buffer_km: 3.0      # keep sensors within (event_radius_km + this) of any event
+    min_observed: 0.5           # drop resampled flow bins whose PeMS %observed avg < this
+    # Fetched setlist.fm events are cached per date window (they're historical and don't change),
+    # so a rebuild reuses them instead of calling the API again. Set true to force a re-fetch.
+    refresh_events: false
+    setlistfm:                  # historical concert source (date-only, city-level coords)
+      default_start_hour: 20    # assumed local start hour (setlist.fm has no event time)
+      default_duration_h: 3.0   # assumed concert length (hours)
+      cities: ["LA", "SF"]      # restrict the venue reference table to these project cities
 
 features:
-  lags: [1, 2, 3, 24, 168]   # in number of timesteps (with freq=1h => 1h,2h,3h,1d,1w)
-  rolling_windows: [3, 24]   # rolling mean/std windows (timesteps)
+  # Lags/rolling windows are in NUMBER OF TIMESTEPS and must match data.freq. Tuned here for
+  # freq=15min: 1..4 = 15/30/45/60 min, 96 = 1 day, 672 = 1 week. (For freq=1h use
+  # [1,2,3,24,168] and windows [3,24].)
+  lags: [1, 2, 3, 4, 96, 672]
+  rolling_windows: [4, 96]   # rolling mean/std windows (timesteps): 1h and 1 day at 15min
   event_radius_km: 5.0       # sensors within this radius of an event are "exposed"
+  event_lead_hours: 3.0      # how many hours BEFORE an event the "approach" congestion
+                             #   begins to build (drives the anticipatory pre_event_pressure)
 
 model:
   type: "random_forest"      # "random_forest" | "gradient_boosting" | "xgboost"
   device: "auto"             # xgboost only: "auto" (GPU if available) | "cuda" | "cpu"
-  test_size: 0.2             # fraction of the timeline held out at the END (time-based split)
+  normalize: "none"          # "none" | "per_sensor" (divide flow features/target by each
+                             #   sensor's mean -> relative patterns that transfer across cities)
+  cross_fit_folds: 5         # Model B real-data proxy: out-of-fold baseline folds (cross-fitting)
+  split:
+    mode: "time"             # "time" (within-city forecasting) | "city" (LA -> SF transfer)
+    time_size: 0.2           # test fraction held out at the END of the timeline (time mode)
+    train_city: "LA"         # city mode: train on this city ...
+    test_city: "SF"          #            ... and test on this one
   random_forest:
     n_estimators: 300
     max_depth: null
@@ -46,6 +101,19 @@ benchmark:
   # Add any model.type here (e.g. a future one) and it joins the comparison automatically.
   models: ["random_forest", "gradient_boosting", "xgboost"]
 
+evaluation:
+  # Statistical rigor for the A -> A+ comparison (scripts.run_stats):
+  #   * repeat over several seeds to average out estimator randomness,
+  #   * rolling-origin (expanding-window) time-series CV instead of a single split,
+  #   * a paired significance test + bootstrap CI on the per-fold MAE gap.
+  seeds: [42, 43, 44]
+  cv:
+    n_folds: 4              # rolling-origin folds (expanding train, forward test block)
+    test_frac: 0.15         # each fold's test block = this fraction of the timeline
+  alpha: 0.05              # significance level for the paired test
+  n_bootstrap: 2000        # bootstrap resamples for the MAE-gap confidence interval
+
 paths:
   models_dir: "models"
-  results_dir: "results"
+  results_dir: "media/results"   # metrics JSON (benchmark.json, metrics.json)
+  figures_dir: "media/figures"   # generated PNG figures

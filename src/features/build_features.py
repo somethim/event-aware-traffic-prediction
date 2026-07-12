@@ -1,16 +1,12 @@
 """Feature engineering.
 
-Two families of features, kept separate on purpose:
+Two families of features are kept separate on purpose. traffic_features() builds the
+temporal and historical lag/rolling features that the baseline model (A) is allowed to see,
+with no event information. event_features() builds the per (sensor, timestamp) event
+exposure that feeds Model B, whose prediction becomes the one extra column A+ gets over A.
 
-  traffic_features()  -> temporal + historical (lag/rolling) features. These are what the
-                         BASELINE traffic model (A) is allowed to see. No event info.
-
-  event_features()    -> per (sensor, timestamp) "event exposure": how close/large/imminent
-                         the nearby planned events are. These feed Model B, and Model B's
-                         prediction is the single extra column that A+ gets over A.
-
-Keeping them separate is what makes the A vs A+ comparison clean: A = traffic_features,
-A+ = traffic_features + event_impact_score.
+Keeping them apart is what makes the comparison clean: A uses traffic_features, A+ uses
+traffic_features plus the event_impact_score.
 """
 
 from __future__ import annotations
@@ -18,19 +14,21 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from ..config import CFG
+from ..config import CFG, target_column
 from ..utils import haversine_km, hours_since
 
 
 # --- Traffic (baseline) features ----------------------------------------------------
 def traffic_features(flow: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
-    """Add temporal + lag + rolling features to the long flow table.
+    """Add temporal, lag, and rolling features to the long flow table.
 
-    Lags/rollings are computed WITHIN each sensor (groupby) so no sensor leaks into another,
-    and only use past values. Rows with undefined lags (start of each series) are dropped.
+    Lags and rollings are computed on the configured target metric (data.target) within each
+    sensor so no sensor leaks into another, and they only use past values. Rows with an
+    undefined lag (start of each series) or a missing target are dropped.
     """
     cfg = cfg or CFG
     fcfg = cfg["features"]
+    tgt = target_column(cfg)
     df = flow.sort_values(["sensor_id", "timestamp"]).copy()
 
     ts = df["timestamp"].dt
@@ -38,24 +36,24 @@ def traffic_features(flow: pd.DataFrame, cfg: dict | None = None) -> pd.DataFram
     df["dayofweek"] = ts.dayofweek
     df["is_weekend"] = (df["dayofweek"] >= 5).astype(int)
     df["month"] = ts.month
-    # Cyclical encodings so the model sees 23:00 and 00:00 as adjacent.
+    # Cyclical encodings so the model treats 23:00 and 00:00 as adjacent.
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["dow_sin"] = np.sin(2 * np.pi * df["dayofweek"] / 7)
     df["dow_cos"] = np.cos(2 * np.pi * df["dayofweek"] / 7)
 
-    g = df.groupby("sensor_id")["flow"]
+    g = df.groupby("sensor_id")[tgt]
     for lag in fcfg["lags"]:
         df[f"lag_{lag}"] = g.shift(lag)
     for w in fcfg["rolling_windows"]:
-        # transform keeps the rolling window WITHIN each sensor (never crosses boundaries);
-        # shift(1) first so the window never includes the current (target) timestep.
-        # win=w binds the current window into each lambda (avoids late-binding closures).
+        # transform keeps each rolling window within one sensor, and shift(1) first so the
+        # window never includes the current target timestep. win=w is bound per lambda to
+        # avoid the late-binding closure trap.
         df[f"roll_mean_{w}"] = g.transform(lambda s, win=w: s.shift(1).rolling(win).mean())
         df[f"roll_std_{w}"] = g.transform(lambda s, win=w: s.shift(1).rolling(win).std())
 
     lag_cols = [f"lag_{l}" for l in fcfg["lags"]]
-    df = df.dropna(subset=lag_cols).reset_index(drop=True)
+    df = df.dropna(subset=lag_cols + [tgt]).reset_index(drop=True)
     return df
 
 
@@ -80,12 +78,15 @@ def traffic_feature_columns(cfg: dict | None = None) -> list[str]:
 
 # --- Event exposure features --------------------------------------------------------
 EVENT_FEATURE_COLUMNS = [
-    "n_active_events",  # events overlapping this timestep within radius
-    "nearest_event_km",  # distance to nearest relevant event (radius if none)
-    "sum_attendance_exposed",  # attendance-weighted, distance-decayed exposure
+    "n_active_events",
+    "nearest_event_km",  # distance to nearest relevant event, or the radius if none
+    "sum_attendance_exposed",  # attendance weighted and distance decayed
     "max_attendance_exposed",
-    "hours_to_next_event",  # signed-ish: hours until the nearest upcoming event start
-    "in_event_window",  # 1 if inside [start-1h, end+1h] of any nearby event
+    "hours_to_next_event",
+    "in_event_window",  # 1 while inside [start-lead, end+post] of any nearby event
+    # Rises as a nearby event approaches, before it even starts, which lets the model predict
+    # leaving-early congestion earlier than the lag features can.
+    "pre_event_pressure",
 ]
 
 
@@ -94,15 +95,16 @@ def event_features(
 ) -> pd.DataFrame:
     """Compute per (sensor, timestamp) event-exposure features.
 
-    Returns a frame keyed by (sensor_id, timestamp) with EVENT_FEATURE_COLUMNS. This is
-    deliberately built ONLY from event metadata (location/time/attendance) + sensor
-    location — exactly what a real event scraper provides — so it is honest about what
-    information the event signal actually carries.
+    Returns a frame keyed by (sensor_id, timestamp) with EVENT_FEATURE_COLUMNS. It is built
+    only from event metadata (location, time, attendance) and sensor location, which is
+    exactly what a real event scraper provides, so it stays honest about what information the
+    event signal actually carries.
     """
     cfg = cfg or CFG
     radius = cfg["features"]["event_radius_km"]
+    lead = cfg["features"].get("event_lead_hours", 3.0)  # how early the approach window opens
+    post = 1.0  # departure buffer after the event ends
 
-    # Everything to numpy up front -> the loops stay in clean float space.
     sensor_ids = sensors["sensor_id"].to_numpy()
     sensor_lat = sensors["lat"].to_numpy(dtype=float)
     sensor_lon = sensors["lon"].to_numpy(dtype=float)
@@ -128,6 +130,7 @@ def event_features(
         sum_att = np.zeros(n_t)
         max_att = np.zeros(n_t)
         in_win = np.zeros(n_t)
+        pre_pressure = np.zeros(n_t)
         nearest_km = np.full(n_t, radius)
         hours_to_next = np.full(n_t, 999.0)
 
@@ -137,15 +140,24 @@ def event_features(
             att = ev_att[j]
             decay = max(0.0, 1.0 - d / radius)
 
-            window = (t_h >= s - 1.0) & (t_h <= e + 1.0)
+            # Window opens `lead` hours before the start for the approach period and closes
+            # `post` hours after the end for the departure period.
+            window = (t_h >= s - lead) & (t_h <= e + post)
             n_active += window
             in_win = np.maximum(in_win, window.astype(float))
             sum_att += window * att * decay
             max_att = np.maximum(max_att, window * att * decay)
             nearest_km = np.where(window & (d < nearest_km), d, nearest_km)
 
-            upcoming = s - t_h  # hours until this event starts (negative once passed)
-            eligible = upcoming >= -ev_dur[j] - 1.0
+            # Anticipatory pressure lives only in the [start-lead, start] approach window and
+            # ramps from 0 at `lead` hours out to 1 at the start, scaled by attendance and
+            # proximity. It is the "people are already heading there" cue.
+            approach = (t_h >= s - lead) & (t_h < s)
+            imminence = np.clip(1.0 - (s - t_h) / lead, 0.0, 1.0)
+            pre_pressure = np.maximum(pre_pressure, approach * imminence * att * decay)
+
+            upcoming = s - t_h  # hours until this event starts, negative once it has passed
+            eligible = upcoming >= -ev_dur[j] - post
             cand = np.where(eligible, np.abs(upcoming), 999.0)
             hours_to_next = np.minimum(hours_to_next, cand)
 
@@ -160,6 +172,7 @@ def event_features(
                     "max_attendance_exposed": max_att,
                     "hours_to_next_event": np.clip(hours_to_next, 0, 72),
                     "in_event_window": in_win,
+                    "pre_event_pressure": pre_pressure,
                 }
             )
         )

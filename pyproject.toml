@@ -8,6 +8,8 @@ dependencies = [
     "numpy>=1.26",
     "pandas>=2.1",
     "scikit-learn>=1.4",
+    # Paired significance tests + bootstrap for the A->A+ evaluation (pipeline.evaluate).
+    "scipy>=1.11",
     "pyarrow>=15.0",
     "pyyaml>=6.0",
     "joblib>=1.3",
@@ -15,11 +17,16 @@ dependencies = [
     # GPU-capable gradient boosting (model.type = xgboost). CPU wheel works everywhere;
     # uses the GPU automatically via device="cuda" when one is available.
     "xgboost>=2.0",
+    # Load API keys from a .env file (src/config.py).
+    "python-dotenv>=1.0",
+    # Fetch the raw PeMS data from the published Google Drive folder (src/data/build_real.py).
+    "gdown>=5.1",
+    "scipy-stubs~=1.18.0",
 ]
 
 [project.optional-dependencies]
-# Real event scraper (src/data/scrape_events.py)
-scrape = ["requests>=2.31", "beautifulsoup4>=4.12"]
+# Fetching real events (setlist.fm historical API + Ticketmaster Discovery API)
+scrape = ["requests>=2.31"]
 # Alternative gradient-boosting backend
 boosting = ["lightgbm>=4.0"]
 dev = [
@@ -50,6 +57,6 @@ warn_unused_ignores = true
 no_implicit_optional = true
 # Third-party libs that ship no type information.
 [[tool.mypy.overrides]]
-module = ["sklearn.*", "joblib.*", "matplotlib.*", "xgboost.*"]
+module = ["sklearn.*", "joblib.*", "matplotlib.*", "xgboost.*", "scipy.*", "gdown.*"]
 ignore_missing_imports = true
 

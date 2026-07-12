@@ -1,8 +1,7 @@
-"""The traffic-prediction model (used for BOTH run A and run A+).
+"""The traffic-prediction model used for both run A and run A+.
 
-`build_model()` returns a fresh estimator of the configured type. Both the baseline and the
-event-aware runs call this, guaranteeing they use the identical model type/hyperparameters —
-so the only thing that differs between A and A+ is the feature set.
+Both runs build their estimator here so they share the same model type and
+hyperparameters. That way the feature set is the only thing that differs between A and A+.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ def build_model(cfg: dict | None = None):
             random_state=seed,
         )
     if mtype == "xgboost":
-        # Lazy import so xgboost is only required when this model is actually selected.
+        # Imported lazily so xgboost is only a dependency when this model is selected.
         from xgboost import XGBRegressor
 
         from ..device import resolve_device
@@ -50,8 +49,8 @@ def build_model(cfg: dict | None = None):
             max_depth=p["max_depth"],
             subsample=p.get("subsample", 0.9),
             colsample_bytree=p.get("colsample_bytree", 0.9),
-            tree_method="hist",  # GPU path uses the same histogram algorithm
-            device=device,  # "cuda" or "cpu"
+            tree_method="hist",
+            device=device,
             random_state=seed,
             n_jobs=-1,
         )
