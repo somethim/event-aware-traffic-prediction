@@ -23,12 +23,11 @@ import pandas as pd
 from scipy import stats
 
 from ..config import CFG, RESULTS_DIR, target_column
-from ..features.build_features import EVENT_FEATURE_COLUMNS, traffic_feature_columns
-from ..models.event_impact_model import build_event_model
+from ..features.build_features import traffic_feature_columns
 from ..models.traffic_model import build_model
 from .preprocess import normalize_per_sensor
 from .prepare import build_feature_frame
-from .train_event_model import _proxy_target
+from .train_event_model import fit_event_score
 
 EVENT_EFFECT_THRESHOLD = 0.05
 
@@ -55,15 +54,8 @@ def _event_mask(df: pd.DataFrame) -> np.ndarray:
 
 
 def _fit_event_score(fold: pd.DataFrame, cfg: dict) -> np.ndarray:
-    """Model B on this fold: predict the event-impact score for every fold row (train-fit only)."""
-    is_train = fold["is_train"].to_numpy()
-    if "true_event_effect" in fold.columns:
-        y = fold["true_event_effect"].to_numpy()
-    else:
-        y = _proxy_target(fold, cfg)
-    mb = build_event_model(cfg)
-    mb.fit(fold[EVENT_FEATURE_COLUMNS][is_train], y[is_train])
-    return np.asarray(mb.predict(fold[EVENT_FEATURE_COLUMNS]), dtype=float)
+    """Model B on this fold: out-of-fold scores for train rows, train-fit for the test block."""
+    return np.asarray(fit_event_score(fold, cfg)[0], dtype=float)
 
 
 def _run_fold_seed(fold: pd.DataFrame, cfg: dict, feats: list[str], tgt: str) -> dict:

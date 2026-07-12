@@ -44,13 +44,21 @@ source-agnostic):
   - **PeMS** (`src/data/pems.py`): the raw 5-min data (~2.7 GB) is published on Google Drive and
     **auto-downloaded** (via `gdown`) into `data/raw/pems/` when missing — it is not kept in the
     repo. The loader reads flow/speed/occupancy + `%Observed`, drops imputed bins, and
-    `data.target` picks which of flow/speed/occupancy the model predicts.
+    `data.target` picks which of flow/speed/occupancy the model predicts. Note that PeMS
+    *pre-fills* dead detectors with plausible-looking historical averages (flagged only via
+    `%Observed`), so the gate un-fills them back to missing rather than training on invented
+    values that by construction contain no event spikes; the build prints per-district
+    retention stats. Detector health is bimodal (alive ≈ complete, dead ≈ fully imputed), so
+    the 50 % threshold is not sensitive.
   - **setlist.fm** (`src/data/setlistfm.py`): a free, *historical* concert API (so it can cover a
     past PeMS window). It gives date-only + city-level coords + no capacity, so a **venue
     reference table** supplies each major LA/SF venue's precise `(lat, lon, capacity)` and a
     default local start hour (20:00). Venue **capacity** is the popularity signal; concerts at
     unlisted venues are dropped. Start times are on PeMS's Pacific-local clock, so events line up
-    with the flow timestamps.
+    with the flow timestamps. Two validation gates keep the table honest: results are checked
+    against the setlist's *own* city (the venue-name search matches nationwide — The Fillmore
+    exists in half a dozen US cities), and multi-artist bills are collapsed to one event per
+    venue-day (setlist.fm returns one setlist per performing artist).
   - Build/refresh it explicitly with `uv run python -m scripts.build_real_dataset` (needs
     `SETLISTFM_API_KEY` in `.env`); the runners also build it once if missing.
 - **`synthetic`** (opt-in) — the generator in `src/data/generate_synthetic.py` fabricates
@@ -78,7 +86,10 @@ uv run python -m scripts.build_real_dataset      # needs SETLISTFM_API_KEY in .e
 #    (or use the controlled synthetic testbed instead: set data.source: synthetic in config)
 
 # 3. run EVERYTHING: experiment matrix (all models × conditions) + headline pipeline + figures
-uv run python -m scripts.run_all         # heavy (several min); fills docs/thesis-notes.md + media/
+uv run python -m scripts.run_all         # fills docs/thesis-notes.md + media/
+#    HEAVY: minutes on synthetic, but plan for HOURS on the real dataset (~1M rows; the
+#    sklearn gradient_boosting cells dominate). Run it detached so it survives the terminal:
+#      nohup uv run python -m scripts.run_all > run_all.log 2>&1 &
 # ...or the individual pieces:
 uv run python -m src.pipeline.prepare            # cached feature matrix
 uv run python -m src.pipeline.train_baseline     # Model A
@@ -124,8 +135,10 @@ show the CPU-vs-GPU trade-off, which feeds the thesis's *response time* criterio
 The **benchmark** (`scripts.run_benchmark`) trains every model listed under
 `benchmark.models` in the config as both A and A+, then prints one comparison table and
 writes `media/results/benchmark.json` + `media/figures/benchmark.png`. Add a model type to that list
-and it joins the comparison automatically. Data prep and Model B run once (they don't
-depend on the traffic model), so only runs A/A+ repeat per model.
+and it joins the comparison automatically. Data prep and Model B run once, so only runs A/A+
+repeat per model. (On real data Model B's proxy target is derived from a baseline of the *base*
+config's `model.type`; all per-model A/A+ runs then share that one score, which keeps the
+comparison consistent across models.)
 
 Optional extra: `uv sync --extra boosting` (lightgbm; xgboost is already a core dependency).
 The setlist.fm/PeMS fetch deps (`requests`, `gdown`) are core, so no extra is needed for real data.
@@ -156,14 +169,28 @@ in `models/`.
 
 ```
 config/config.yaml          all knobs (data size, model type, features)
+docs/thesis-notes.md        methodology notes + auto-generated experiment table (paper source)
 src/data/                   PeMS + setlist.fm loaders, Drive fetch/build, synthetic generator
 src/features/               feature engineering (temporal, lags, event exposure)
 src/models/                 traffic model, event-impact model, metrics
-src/pipeline/               train A / B / A+  and  compare
-scripts/run_all.py          one-shot runner
-media/results/             metrics JSON
-media/figures/             generated figures
+src/pipeline/               train A / B / A+, compare, benchmark, stats CV, figures
+scripts/                    thin runners (run_all, run_benchmark, run_stats, run_visuals, ...)
+tests/                      offline test suite (isolated tmp dir; never touches data/)
+media/results/              metrics JSON (metrics, benchmark, experiments, stats)
+media/figures/              generated figures
 ```
+
+## Reproducing the thesis results (checklist)
+
+1. `uv sync --extra dev` and put `SETLISTFM_API_KEY` in `.env` (only needed to rebuild events).
+2. `uv run python -m scripts.build_real_dataset` — skip if `data/processed_inputs/*.parquet`
+   already exist (the runners also build it on demand).
+3. `nohup uv run python -m scripts.run_all > run_all.log 2>&1 &` — experiment matrix +
+   headline pipeline + figures. Hours on real data; safe to leave unattended.
+4. `uv run python -m scripts.run_stats` — significance test + CI for the A→A+ gap.
+5. Collect: `media/results/*.json`, `media/figures/*.png`, and the auto-filled experiment
+   table in `docs/thesis-notes.md` §4.2. For the synthetic-only mechanism figures, set
+   `data.source: synthetic` in the config and rerun `run_all` once.
 
 ## Thesis evaluation criteria (from the abstract)
 

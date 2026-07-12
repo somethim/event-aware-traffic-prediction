@@ -55,6 +55,18 @@ def steps_per(freq: str, period: str = "1D") -> int:
     return int(pd.Timedelta(period) / pd.Timedelta(freq))
 
 
+def time_block_folds(times: npt.ArrayLike, n_folds: int) -> list[npt.NDArray[np.intp]]:
+    """Positions of `times` cut into `n_folds` contiguous chronological blocks.
+
+    Used for cross-fitting on time series. A shuffled K-fold would predict each held-out row
+    with a model trained on its immediate temporal neighbours (including later ones), leaking
+    the future through autocorrelation; contiguous blocks keep each held-out row's
+    neighbourhood out of its training folds.
+    """
+    order = np.argsort(np.asarray(times), kind="stable")
+    return [blk for blk in np.array_split(order, n_folds) if len(blk)]
+
+
 def time_split_mask(timestamps: npt.ArrayLike, test_size: float) -> tuple[BoolArray, BoolArray]:
     """Boolean train/test masks with a time-based split, where the test set is the last
     `test_size` fraction of the timeline. The split is time-based rather than random so we

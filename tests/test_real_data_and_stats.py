@@ -18,26 +18,45 @@ from src.data import setlistfm
 
 from src.data.build_real import _drive_file_id, _extract_archive, _flatten_extracted
 from src.data.generate_synthetic import generate
-from src.features.build_features import traffic_features
+from src.features.build_features import traffic_feature_columns, traffic_features
 from src.pipeline import evaluate, prepare
 from src.pipeline.preprocess import normalize_per_sensor
 
 from src.pipeline.train_event_model import _proxy_target
-from src.utils import to_local_naive
+from src.utils import time_block_folds, to_local_naive
 
 
-def _payload(*venue_names: str) -> dict:
+def _setlist(
+    i: int,
+    venue_name: str,
+    city_name: str = "Inglewood",
+    state_code: str = "CA",
+    lat: float = 33.96,
+    lon: float = -118.35,
+) -> dict:
+    """One setlist.fm search result with the city block the API always attaches to a venue."""
     return {
-        "total": len(venue_names),
-        "setlist": [
-            {"id": f"e{i}", "eventDate": "11-05-2026", "venue": {"name": n}}
-            for i, n in enumerate(venue_names)
-        ],
+        "id": f"e{i}",
+        "eventDate": "11-05-2026",
+        "venue": {
+            "name": venue_name,
+            "city": {
+                "name": city_name,
+                "stateCode": state_code,
+                "coords": {"lat": lat, "long": lon},
+            },
+        },
     }
 
 
+def _payload(*setlists: dict) -> dict:
+    return {"total": len(setlists), "setlist": list(setlists)}
+
+
 def test_setlistfm_parse_keeps_known_venue_with_capacity():
-    df = setlistfm.parse_setlists(_payload("SoFi Stadium", "Some Tiny Unlisted Bar"))
+    df = setlistfm.parse_setlists(
+        _payload(_setlist(0, "SoFi Stadium"), _setlist(1, "Some Tiny Unlisted Bar"))
+    )
     # Only the known reference venue should survive; the unlisted bar is dropped.
     assert len(df) == 1
     row = df.iloc[0]
@@ -88,8 +107,68 @@ def test_tar_xz_archive_extracts_and_flattens(tmp_path):
 
 
 def test_setlistfm_custom_start_hour():
-    df = setlistfm.parse_setlists(_payload("Chase Center"), default_start_hour=19)
+    chase = _setlist(0, "Chase Center", "San Francisco", "CA", 37.7749, -122.4194)
+    df = setlistfm.parse_setlists(_payload(chase), default_start_hour=19)
     assert df.iloc[0]["start_time"] == pd.Timestamp("2026-05-11 19:00:00")
+
+
+def test_setlistfm_rejects_same_name_venue_in_other_city():
+    # setlist.fm's venueName search matches nationwide: a Philadelphia Fillmore concert must
+    # not be stamped with the San Francisco Fillmore's coordinates and capacity.
+    ref = setlistfm.VENUE_REFERENCE[setlistfm._norm("The Fillmore")]
+    df = setlistfm.parse_setlists(
+        _payload(
+            _setlist(0, "The Fillmore", "San Francisco", "CA", 37.7749, -122.4194),
+            _setlist(1, "The Fillmore", "Philadelphia", "PA", 39.9526, -75.1652),
+        ),
+        venue=ref,
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["city"] == "SF"
+
+
+def test_setlistfm_city_state_fallback_when_coords_missing():
+    ref = setlistfm.VENUE_REFERENCE[setlistfm._norm("The Fillmore")]
+    sl = _setlist(0, "The Fillmore", "San Francisco", "CA")
+    del sl["venue"]["city"]["coords"]  # no coords: fall back to the state code
+    assert len(setlistfm.parse_setlists(_payload(sl), venue=ref)) == 1
+    sl["venue"]["city"]["stateCode"] = "PA"
+    assert len(setlistfm.parse_setlists(_payload(sl), venue=ref)) == 0
+
+
+def test_setlistfm_dedupes_multi_artist_bills():
+    # setlist.fm returns one setlist per artist, so a headliner + opener at the same venue and
+    # date must collapse to a single event (otherwise attendance exposure double-counts).
+    df = setlistfm.parse_setlists(
+        _payload(_setlist(0, "SoFi Stadium"), _setlist(1, "SoFi Stadium"))
+    )
+    assert len(df) == 2  # the parser keeps both artists' setlists ...
+    assert len(setlistfm.dedupe_events(df)) == 1  # ... and the dedupe collapses the bill
+
+
+def test_time_block_folds_are_chronological_blocks():
+    times = pd.date_range("2026-05-11", periods=10, freq="1h").to_numpy()
+    folds = time_block_folds(times, 3)
+    positions = np.concatenate(folds)
+    assert sorted(positions.tolist()) == list(range(10))
+    # With chronologically sorted input, blocks are contiguous runs marching forward in time.
+    flat = [int(p) for blk in folds for p in blk]
+    assert flat == sorted(flat)
+
+
+def test_traffic_features_drop_rows_with_nan_rolling_gap():
+    # A NaN gap (real PeMS data has them from %Observed gating) makes rolling features NaN on
+    # rows whose lags are all defined; those rows must be dropped or GradientBoosting crashes.
+    cfg = copy.deepcopy(CFG)
+    cfg["features"]["lags"] = [1, 2]
+    cfg["features"]["rolling_windows"] = [3]
+    ts = pd.date_range("2026-05-11", periods=30, freq="15min")
+    vals = np.arange(30.0) + 100
+    vals[10] = np.nan
+    flow = pd.DataFrame({"sensor_id": 1, "city": "LA", "timestamp": ts, "flow": vals})
+    feat = traffic_features(flow, cfg)
+    assert len(feat) > 0
+    assert not feat[traffic_feature_columns(cfg)].isna().to_numpy().any()
 
 
 def test_to_local_naive_shifts_utc_to_pacific():

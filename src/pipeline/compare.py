@@ -83,7 +83,7 @@ def main(cfg: dict | None = None) -> dict:
     out.write_text(json.dumps(results, indent=2))
 
     _plot_bars(overall, event_only, target_units(cfg))
-    _plot_event_window(load_merged())
+    _plot_event_window(load_merged(), target_column(cfg), target_units(cfg))
 
     print("\n=== A vs A+ ===")
     print(
@@ -136,7 +136,7 @@ def _plot_bars(overall: dict, event_only: dict, units: str = "veh/interval") -> 
     plt.close(fig)
 
 
-def _plot_event_window(df: pd.DataFrame) -> None:
+def _plot_event_window(df: pd.DataFrame, tgt: str = "flow", units: str = "veh/interval") -> None:
     """Time series for the single sensor with the largest event effect in the test set."""
     if "true_event_effect" not in df.columns or df["true_event_effect"].max() <= 0:
         return
@@ -150,14 +150,14 @@ def _plot_event_window(df: pd.DataFrame) -> None:
     ]
 
     fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(win["timestamp"], win["flow"], color="black", lw=2, label="actual flow")
+    ax.plot(win["timestamp"], win[tgt], color="black", lw=2, label=f"actual {tgt}")
     ax.plot(win["timestamp"], win["baseline_pred"], "--", color="#8899aa", label="A (baseline)")
     ax.plot(
         win["timestamp"], win["event_aware_pred"], "--", color="#2f7d4f", label="A+ (event-aware)"
     )
     ax.axvline(peak, color="#c04040", alpha=0.4, lw=1)  # type: ignore[arg-type]
     ax.set_title(f"Sensor {sid} around its biggest event (test set)")
-    ax.set_ylabel("flow (veh/h)")
+    ax.set_ylabel(f"{tgt} ({units})")
     ax.legend()
     fig.autofmt_xdate()
     fig.tight_layout()

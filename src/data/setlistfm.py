@@ -14,6 +14,12 @@ venues are dropped. Extend VENUE_REFERENCE to widen coverage.
 
 Since setlist.fm is date-only, the assembled start time is already local wall-clock (naive),
 which lines up with PeMS's Pacific-local-naive timestamps without any conversion.
+
+Two data-quality traps in the API's shape are handled here. The venueName search matches
+venues nationwide and several reference names are chains or duplicates (The Fillmore, Fox
+Theater, Greek Theatre ...), so every setlist is validated against its own city block before
+it may inherit the reference venue's coords and capacity. And setlist.fm returns one setlist
+per performing artist, so multi-artist bills are collapsed to one event per venue and day.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import pandas as pd
 
 from ..config import get_env
+from ..utils import haversine_km
 
 if TYPE_CHECKING:
     import requests
@@ -33,6 +40,9 @@ SEARCH_URL = "https://api.setlist.fm/rest/1.0/search/setlists"
 ITEMS_PER_PAGE = 20  # fixed by the API
 CATEGORY = "concert"
 USER_AGENT = "event-aware-traffic-prediction (thesis research)"
+# How far a setlist's own city coords may sit from the reference venue and still count as the
+# same place. City coords are metro-level, so this only needs to separate metros, not blocks.
+MAX_CITY_VENUE_KM = 40.0
 
 
 class Venue(NamedTuple):
@@ -103,7 +113,9 @@ def parse_setlists(
 
     Keeps only setlists whose venue matches a reference venue (so location + capacity are
     known). If `venue` is given (per-venue query), every returned setlist is matched against it;
-    otherwise the setlist's own venue name is looked up in VENUE_REFERENCE.
+    otherwise the setlist's own venue name is looked up in VENUE_REFERENCE. Either way the
+    setlist must also pass `_city_matches`, since a name match alone would let a same-named
+    venue elsewhere in the country inherit our venue's coords and capacity.
     """
     rows = []
     for sl in payload.get("setlist", []):
@@ -112,6 +124,8 @@ def parse_setlists(
             continue
         ref = venue if venue is not None else VENUE_REFERENCE.get(_norm(_venue_name(sl)))
         if ref is None:  # unlisted venue, so no capacity or coords to use
+            continue
+        if not _city_matches(sl, ref):  # same-named venue somewhere else in the country
             continue
         day = pd.Timestamp(pd.to_datetime(date, format="%d-%m-%Y"))
         start = day + pd.Timedelta(hours=default_start_hour)  # local wall-clock, naive
@@ -132,6 +146,32 @@ def parse_setlists(
 
 def _venue_name(setlist: dict) -> str:
     return (setlist.get("venue") or {}).get("name", "") or ""
+
+
+def _city_matches(setlist: dict, ref: Venue, max_km: float = MAX_CITY_VENUE_KM) -> bool:
+    """True when the setlist's own venue city is plausibly the reference venue's location.
+
+    Uses the city coordinates setlist.fm attaches to every venue, falling back to the state
+    code when coords are missing. No usable city info means the match cannot be proven, so
+    the setlist is dropped rather than risking cross-country contamination.
+    """
+    city = (setlist.get("venue") or {}).get("city") or {}
+    coords = city.get("coords") or {}
+    lat, lon = coords.get("lat"), coords.get("long")
+    if lat is not None and lon is not None:
+        return float(haversine_km(float(lat), float(lon), ref.lat, ref.lon)) <= max_km
+    return city.get("stateCode") == "CA"
+
+
+def dedupe_events(events: pd.DataFrame) -> pd.DataFrame:
+    """Collapse multi-artist bills into one event per (venue, day).
+
+    setlist.fm returns one setlist per performing artist, so a headliner-plus-openers show
+    would otherwise appear several times and multiply the attendance exposure downstream.
+    """
+    if events.empty:
+        return events
+    return events.drop_duplicates(subset=["lat", "lon", "start_time"]).reset_index(drop=True)
 
 
 def _get(headers: dict, params: dict, sleep_s: float) -> requests.Response:
@@ -157,7 +197,7 @@ def fetch_events(
     window: tuple[str, str],
     cfg: dict,
     api_key: str | None = None,
-    max_pages_per_venue: int = 5,
+    max_pages_per_venue: int = 40,
     sleep_s: float = 0.6,
 ) -> pd.DataFrame:
     """Query setlist.fm for concerts at every reference venue within a date window.
@@ -200,11 +240,17 @@ def fetch_events(
                 total = int(payload.get("total", 0))
                 if page * ITEMS_PER_PAGE >= total:
                     break
+            else:
+                print(
+                    f"[setlistfm] WARNING {v.display} {year}: truncated at "
+                    f"{max_pages_per_venue * ITEMS_PER_PAGE} of {total} setlists — raise "
+                    "max_pages_per_venue if the missing pages could fall inside the window"
+                )
 
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not out.empty:
-        # Keep only events inside the PeMS window.
+        # Keep only events inside the PeMS window, then collapse multi-artist bills.
         mask = (out["start_time"] >= start) & (out["start_time"] <= end + pd.Timedelta(days=1))
-        out = out[mask].drop_duplicates(subset="event_id").reset_index(drop=True)
+        out = dedupe_events(out[mask].drop_duplicates(subset="event_id"))
     print(f"[setlistfm] fetched {len(out)} concerts across {len(venues_for(cities))} venues")
     return out

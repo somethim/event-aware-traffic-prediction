@@ -1,8 +1,9 @@
 """Multi-model benchmark. Runs A and A+ for every model in config's benchmark.models and
 compares them in one table and chart, recording accuracy and inference latency for each.
 
-Data prep and Model B run once up front. The event-impact score does not depend on the
-traffic model type, so only runs A and A+ repeat per model.
+Data prep and Model B run once up front with the base config (on real data the proxy target
+uses the base config's model type as its baseline), so only runs A and A+ repeat per model
+and every model comparison shares the same event-impact score.
 
     uv run python -m scripts.run_benchmark      # or: python -m src.pipeline.benchmark
 

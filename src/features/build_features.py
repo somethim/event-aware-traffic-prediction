@@ -53,7 +53,11 @@ def traffic_features(flow: pd.DataFrame, cfg: dict | None = None) -> pd.DataFram
         df[f"roll_std_{w}"] = g.transform(lambda s, win=w: s.shift(1).rolling(win).std())
 
     lag_cols = [f"lag_{l}" for l in fcfg["lags"]]
-    df = df.dropna(subset=lag_cols + [tgt]).reset_index(drop=True)
+    roll_cols = [f"roll_{stat}_{w}" for w in fcfg["rolling_windows"] for stat in ("mean", "std")]
+    # Rolling columns must be checked too: a NaN gap in the series (real data has them from the
+    # %Observed gating) makes a rolling feature NaN even when every lag is defined, and
+    # sklearn's GradientBoostingRegressor rejects NaN inputs outright.
+    df = df.dropna(subset=lag_cols + roll_cols + [tgt]).reset_index(drop=True)
     return df
 
 

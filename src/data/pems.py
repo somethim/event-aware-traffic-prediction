@@ -132,8 +132,16 @@ def load_5min_dir(
         .reset_index()
     )
     # Empty bins sum to a fake zero flow and low-%Observed bins are mostly imputed, so NaN both.
-    untrusted = (agg["n_obs"] == 0) | (agg["observed"].fillna(0) / 100.0 < min_observed)
+    empty = agg["n_obs"] == 0
+    low_obs = ~empty & (agg["observed"].fillna(0) / 100.0 < min_observed)
+    untrusted = empty | low_obs
     agg.loc[untrusted, ["flow", "speed", "occupancy"]] = pd.NA
+    # Report retention so an over-aggressive min_observed can't silently throw the data away.
+    print(
+        f"[pems] {city}: {len(raw):,} raw 5-min rows -> {len(agg):,} {freq} bins | nulled "
+        f"{int(empty.sum()):,} empty + {int(low_obs.sum()):,} below {min_observed:.0%} observed "
+        f"({untrusted.mean():.1%} of bins untrusted)"
+    )
     agg["city"] = city
     return agg[["sensor_id", "city", "timestamp", "flow", "speed", "occupancy"]]
 

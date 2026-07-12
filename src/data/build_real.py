@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..config import CFG, EVENTS_FILE, FLOW_FILE, INPUTS_DIR, ROOT, SENSORS_FILE
+from ..config import CFG, DATA_ROOT, EVENTS_FILE, FLOW_FILE, INPUTS_DIR, SENSORS_FILE
 from ..data import setlistfm
 from ..data.pems import (
     build_flow_and_sensors_wanted,
@@ -77,13 +77,13 @@ def fetch_pems_from_drive(cfg: dict | None = None) -> None:
     """
     cfg = cfg or CFG
     real = cfg["data"]["real"]
-    dirs = [ROOT / d for d in real["pems_dirs"].values()]
+    dirs = [DATA_ROOT / d for d in real["pems_dirs"].values()]
     if all(d.exists() and any(d.glob("*station_5min_*.txt.gz")) for d in dirs):
         return
 
     import gdown  # imported here so the download dependency stays optional
 
-    dest = ROOT / real["pems_root"]
+    dest = DATA_ROOT / real["pems_root"]
     dest.mkdir(parents=True, exist_ok=True)
 
     archive_url = real.get("gdrive_archive_url")
@@ -164,7 +164,7 @@ def build_real(cfg: dict | None = None) -> None:
     fetch_pems_from_drive(cfg)
 
     # Use the date range shared by both districts.
-    ranges = {c: date_range(ROOT / d) for c, d in real["pems_dirs"].items()}
+    ranges = {c: date_range(DATA_ROOT / d) for c, d in real["pems_dirs"].items()}
     start = max(r[0] for r in ranges.values())
     end = min(r[1] for r in ranges.values())
     print(f"[build] date window {start} .. {end}")
@@ -175,7 +175,7 @@ def build_real(cfg: dict | None = None) -> None:
     flow_parts: list[pd.DataFrame] = []
     sensor_parts: list[pd.DataFrame] = []
     for city, rel_dir in real["pems_dirs"].items():
-        directory = ROOT / rel_dir
+        directory = DATA_ROOT / rel_dir
         meta = load_station_meta(find_meta_file(directory))
         city_events = events.loc[events["city"] == city] if not events.empty else events
         wanted = _sensors_near_events(meta, city_events, keep_km)

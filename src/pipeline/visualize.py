@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ..config import CFG, FIGURES_DIR
+from ..config import CFG, FIGURES_DIR, target_column, target_units
 from ..data.build_real import ensure_dataset
 from ..data.load import load_events, load_flow, load_sensors
 from ..features.build_features import traffic_feature_columns
@@ -106,13 +106,13 @@ def plot_feature_importance(cfg: dict, top_n: int = 15) -> None:
     _save(fig, "feature_importance.png")
 
 
-def plot_pred_vs_actual(merged: pd.DataFrame, sample: int = 5000) -> None:
-    """Predicted vs actual flow for A and A+. Points near the diagonal are accurate."""
+def plot_pred_vs_actual(merged: pd.DataFrame, tgt: str = "flow", sample: int = 5000) -> None:
+    """Predicted vs actual target for A and A+. Points near the diagonal are accurate."""
     rng = np.random.default_rng(CFG["seed"])
     idx = rng.choice(len(merged), size=min(sample, len(merged)), replace=False)
     s = merged.iloc[idx]
     lim = max(
-        float(np.nanmax(s["flow"].to_numpy())), float(np.nanmax(s["event_aware_pred"].to_numpy()))
+        float(np.nanmax(s[tgt].to_numpy())), float(np.nanmax(s["event_aware_pred"].to_numpy()))
     )
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 5), sharex=True, sharey=True)
@@ -120,21 +120,21 @@ def plot_pred_vs_actual(merged: pd.DataFrame, sample: int = 5000) -> None:
         (axes[0], "baseline_pred", "A (baseline)", BASELINE_COLOR),
         (axes[1], "event_aware_pred", "A+ (event-aware)", EVENT_COLOR),
     ):
-        ax.scatter(s["flow"], s[col], s=5, alpha=0.25, color=color)
+        ax.scatter(s[tgt], s[col], s=5, alpha=0.25, color=color)
         ax.plot([0, lim], [0, lim], "k--", lw=1)
-        ax.set_xlabel("actual flow")
+        ax.set_xlabel(f"actual {tgt}")
         ax.set_title(title)
-    axes[0].set_ylabel("predicted flow")
-    fig.suptitle("Predicted vs actual flow")
+    axes[0].set_ylabel(f"predicted {tgt}")
+    fig.suptitle(f"Predicted vs actual {tgt}")
     _save(fig, "pred_vs_actual.png")
 
 
-def plot_error_vs_event_effect(merged: pd.DataFrame) -> None:
+def plot_error_vs_event_effect(merged: pd.DataFrame, tgt: str = "flow") -> None:
     """Key figure. Mean absolute error binned by event size. A+ should pull ahead of A as the
     event effect grows, which is the thesis hypothesis made visible."""
     df = merged.copy()
-    df["err_A"] = (df["flow"] - df["baseline_pred"]).abs()
-    df["err_Aplus"] = (df["flow"] - df["event_aware_pred"]).abs()
+    df["err_A"] = (df[tgt] - df["baseline_pred"]).abs()
+    df["err_Aplus"] = (df[tgt] - df["event_aware_pred"]).abs()
     bins = [0, 0.01, 0.05, 0.1, 0.2, 0.4, np.inf]
     labels = ["~0", "0.01–.05", ".05–.1", ".1–.2", ".2–.4", ">0.4"]
     df["bin"] = pd.cut(df["true_event_effect"], bins=bins, labels=labels, right=False)
@@ -147,7 +147,7 @@ def plot_error_vs_event_effect(merged: pd.DataFrame) -> None:
     ax.set_xticks(x)
     ax.set_xticklabels(grp.index)
     ax.set_xlabel("event effect bin (fractional uplift)")
-    ax.set_ylabel("mean absolute error (veh/interval)")
+    ax.set_ylabel(f"mean absolute error ({target_units()})")
     ax.set_title("Prediction error vs event size — where event data helps")
     ax.legend()
     _save(fig, "error_vs_event_effect.png")
@@ -206,17 +206,18 @@ def run(cfg: dict | None = None) -> None:
 
     flow = load_flow()
     merged = compare.load_merged()
+    tgt = target_column(cfg)
 
     plot_flow_profile(flow)
     plot_sensor_event_map(load_sensors(), load_events())
     plot_feature_importance(cfg)
-    plot_pred_vs_actual(merged)
+    plot_pred_vs_actual(merged, tgt)
     plot_xgb_training_curve(cfg)
     # The ground-truth-effect figures only work on the synthetic testbed; real data has no label.
     if "true_event_effect" in flow.columns:
         plot_event_effect_hist(flow)
     if "true_event_effect" in merged.columns:
-        plot_error_vs_event_effect(merged)
+        plot_error_vs_event_effect(merged, tgt)
     else:
         print("[viz] skipping event-effect figures (no ground-truth effect on real data)")
     print(f"\n[viz] all figures in {FIGURES_DIR}/")

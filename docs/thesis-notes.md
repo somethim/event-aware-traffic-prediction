@@ -117,8 +117,10 @@ single model. Model choice rationale:
   the hypothesis predicts the gain concentrates there. Reporting only the overall number
   would dilute and hide the effect.
 - **Benchmark command** sweeps every model in `config.benchmark.models`, runs each as A and
-  A+, and emits one comparison table + chart. Data prep and Model B run once (they don't
-  depend on the traffic model), so only A/A+ repeat per model.
+  A+, and emits one comparison table + chart. Data prep and Model B run once, so only A/A+
+  repeat per model. (On real data Model B's proxy target is derived from a baseline of the
+  *base* config's `model.type`; the per-model runs share that one score, keeping the
+  comparison consistent.)
 
 ### 2.9 Feature engineering choices
 - **Lag features** (past target at t−1, −2, −3, −4, −96, −672 steps) — traffic is highly
@@ -173,7 +175,15 @@ worth documenting as methodology:
   LA/SF venue to precise `(lat, lon, capacity)`; **capacity is the popularity signal** (the
   hypothesis needs *expected* size, which venue capacity bounds, not measured turnout), the
   start time is assumed at a fixed local hour (20:00), and concerts at unlisted venues are
-  dropped so every retained event has a trustworthy signal. This is an honest-information
+  dropped so every retained event has a trustworthy signal. Two further data-quality gates
+  proved necessary: setlist.fm's venue-name search matches venues *nationwide* and several
+  reference names are chains or duplicates (The Fillmore alone exists in half a dozen US
+  cities; the Greek Theatre exists in both LA and Berkeley), so every returned setlist is
+  validated against its own city coordinates (within 40 km of the reference venue) before it
+  may inherit the venue's coords and capacity — without this, phantom out-of-state "events"
+  contaminate the exposure features. And since setlist.fm returns one setlist *per performing
+  artist*, multi-artist bills are collapsed to one event per venue-day so a headliner plus
+  openers doesn't multiply the attendance signal. This is an honest-information
   argument: the model only ever sees what a real planner could know in advance. (A *live*
   deployment would instead pair an upcoming-events feed such as the Ticketmaster Discovery API
   [10] with a live traffic feed — see §5/§6; that is out of scope for this offline study.)
@@ -182,17 +192,41 @@ worth documenting as methodology:
   congestion in the middle of the night). Event times are converted into the PeMS local clock
   before feature construction. A silent version of this bug would have destroyed the event
   signal while leaving the code apparently working — a good cautionary methodology note.
-- **Missing / imputed data.** PeMS backfills detector gaps and flags real coverage via
-  `%Observed`. Resampling naively turned empty 5-minute bins into *flow = 0* (fake "no traffic")
-  and blended imputed values in. Bins with no underlying samples or average `%Observed` below a
-  threshold are now set to missing (and dropped) rather than treated as measured — otherwise the
-  model trains on fabricated zeros.
+- **Missing / imputed data — "un-filling", not infilling.** A dead loop detector does *not*
+  mean "no traffic": the induction coil or its comms failed while cars kept driving over it.
+  PeMS papers over such failures itself — every station reports a value every 5 minutes with
+  no gaps (288/288 daily samples in the raw files), and dead detectors are backfilled with
+  *typical* traffic for that time slot, flagged via `%Observed = 0`. The invented values look
+  entirely plausible (mean 297 veh/5min vs 317 on live detectors in a sampled D7 day), so
+  without the flag the imputation is invisible. The pipeline therefore does the *reverse* of
+  infilling: bins whose average `%Observed` falls below a threshold (default 50 %) are set
+  back to missing, kept on the regular 15-min grid so lag features stay time-aligned, and any
+  row whose target or lag/rolling feature touches a missing value is dropped (listwise
+  deletion). Two facts make this the right call for this thesis:
+  1. *Imputed values cannot contain event spikes by construction* — they are historical
+     averages, so training or scoring on them would systematically erase the event-driven
+     deviations the study is trying to measure, biasing the experiment against its own
+     hypothesis (and Model A would partly learn to predict PeMS's imputation model).
+  2. *The deletion is unbiased here* — detectors die for hardware reasons unrelated to
+     nearby events, so the missingness mechanism is independent of the quantity being
+     studied and dropping those rows does not distort the event-effect estimate.
+  Detector health turned out to be strongly **bimodal**: a station is either alive (≥99 % of
+  its bins pass the gate) or dead (0 % observed, fully imputed) — there is almost no middle
+  ground, so any threshold between ~20 % and ~80 % selects the same sensors. In the study
+  window 86.6 % of D7 (LA) mainline stations and 39.3 % of D4 (SF) stations were dead; the
+  gate excludes them rather than letting the model train on fabricated data. If naive
+  resampling had also been left in place, empty bins would additionally have become
+  *flow = 0* rows — fake "no traffic" — which the `n_obs` guard prevents.
 - **Model B proxy target is cross-fitted.** With no ground-truth event effect on real data,
   Model B trains on the baseline's positive residual (traffic history couldn't explain). Using
   *in-sample* residuals makes the baseline look artificially good on its own training rows and
   shrinks the proxy signal; predictions are now **out-of-fold** (each train row scored by a
   baseline fit on the other folds), which is standard cross-fitting for a
-  learned-target-from-a-model setup.
+  learned-target-from-a-model setup [14]. The folds are contiguous **time blocks**, not a
+  shuffled K-fold — shuffling would predict each row with a baseline trained on rows
+  interleaved with (and after) it, leaking the future through autocorrelation. Model B's own
+  `event_impact_score` is cross-fitted the same way, so run A+ trains on out-of-fold scores of
+  the same quality it will see on the test set rather than cleaner in-sample ones.
 
 ### 2.13 Statistical rigor (significance of the A→A+ gap)
 A single split + single seed cannot support "the event feature helps." `pipeline.evaluate`
@@ -232,14 +266,43 @@ epochs and is where a GPU helps most.
 
 ---
 
-## 4. Current results (synthetic dataset)
+## 4. Data and current results
+
+### 4.0 The real dataset (for the paper's Data chapter)
+
+Built 2026-07-12 with all data-quality gates of §2.12 in place:
+
+- **Traffic**: Caltrans PeMS Station 5-Minute, districts **D7 (Los Angeles)** and **D4 (SF
+  Bay Area)**, window **2026-05-11 → 2026-07-11** (62 days), resampled to 15-minute bins
+  (flow summed; speed/occupancy averaged), `%Observed ≥ 50 %` gating.
+- **Events**: **164 concerts** (105 LA / 59 SF) at the 24 reference venues, after the venue
+  city-validation and per-show dedup gates. (Before those gates the same fetch yielded 490
+  "events" — roughly **two-thirds were contamination**: same-named venues elsewhere in the
+  country, e.g. 93 phantom shows attributed to the SF Fillmore in 61 days, plus one setlist
+  per performing artist per show. A useful cautionary tale for the methodology chapter.)
+- **Sensors**: 954 mainline detectors within `event_radius_km + station_buffer_km` (5+3 km)
+  of a reference venue. Detector health is bimodal (§2.12): 54 LA + 82 SF sensors have ≥80 %
+  usable bins and contribute **~695 k fully-usable rows** (300 k LA / 394 k SF); the rest sit
+  under dead detectors and drop out in feature construction (23.1 % of all bins usable).
+- Result artifacts land in `media/results/` (`metrics.json`, `benchmark.json`,
+  `experiments.json`, `stats.json`) and `media/figures/`; the experiment-matrix table in
+  §4.2 is rewritten automatically by `scripts.run_experiments` / `scripts.run_all`.
+
+> ⚠️ **Do not quote any real-data numbers produced before 2026-07-12** — they were computed
+> on the contaminated events table (and Model B's cross-fitting was shuffled rather than
+> time-blocked). Regenerate everything with
+> `uv run python -m scripts.run_all && uv run python -m scripts.run_stats`
+> and copy the fresh numbers from `media/results/` into §4.1b below.
+
+### 4.1 Mechanism validation on the synthetic testbed
 
 Full run: 35 sensors, 90 days at 15-minute resolution; 140 events; ~3.6 % of rows
 event-affected. Time-based 80/20 split. Metric shown = MAE (vehicles/interval).
 
 > ⚠️ **Stale after the lag retune (§2.9).** The per-model table below predates the
-> resolution-tuned lags; regenerate it with `uv run python -m scripts.run_all` before quoting.
-> As a spot check, a fresh default Random Forest run with the new lags gives A MAE 30.46 →
+> resolution-tuned lags; regenerate it (set `data.source: synthetic`, then
+> `uv run python -m scripts.run_all`) before quoting. As a spot check, a fresh default
+> Random Forest run with the new lags gives A MAE 30.46 →
 > A+ 30.12 overall (**+1.1 %**) and 48.91 → 41.53 on event-affected rows (**+15.1 %**) — a
 > *larger* event gain than the old numbers, i.e. the retune helped.
 
@@ -263,7 +326,23 @@ event-affected. Time-based 80/20 split. Metric shown = MAE (vehicles/interval).
 
 Metric artifacts: `media/results/benchmark.json`, `media/results/metrics.json`.
 
-### 4.1 Figures (generated by `scripts.run_visuals` → `media/figures/`)
+### 4.1b Real-data results (headline — fill in after the regeneration run)
+
+Copy from `media/results/` once `run_all` + `run_stats` complete on the cleaned dataset:
+
+| Source file | What to quote |
+|---|---|
+| `metrics.json` | headline A vs A+ (default RF): MAE/RMSE/MAPE/R², overall + event-window subset |
+| `benchmark.json` | the §4.1-style per-model table (RF / GB / XGBoost, Δ% + latency) |
+| `stats.json` | mean MAE gap ± bootstrap CI, t-test / Wilcoxon p, per lens — the "significant?" claim |
+| `experiments.json` | auto-rendered into §4.2 below |
+
+Note when interpreting: on real data the "event-affected" lens is `in_event_window == 1`
+(inside `[start − lead, end + 1 h]` of a nearby event) — a *coarser* lens than the synthetic
+ground-truth-effect threshold, since there is no true label (§2.5). Expect it to dilute the
+measured gain relative to the synthetic setting, not inflate it.
+
+### 4.1c Figures (generated by `scripts.run_visuals` → `media/figures/`)
 
 Each figure is produced by a self-contained function in `src/pipeline/visualize.py` (usable
 as a code snippet in the thesis). Suggested placement in the paper:
@@ -281,6 +360,11 @@ as a code snippet in the thesis). Suggested placement in the paper:
 | `benchmark.png` | Event-affected MAE, A vs A+, per model | Results (cross-model) |
 | `event_window_sensor.png` | Actual vs A vs A+ around one real event | Results (qualitative) |
 
+Note: `event_effect_hist.png`, `error_vs_event_effect.png`, and `event_window_sensor.png`
+need the ground-truth event effect, so they are only produced on the **synthetic** testbed
+(the run skips them on real data and says so). Generate them once from a synthetic run for
+the methodology/mechanism chapter; the rest regenerate on real data.
+
 ### 4.2 Experiment matrix
 
 Every combination of `split × normalize × model` is run separately by
@@ -295,19 +379,36 @@ _Run `uv run python -m scripts.run_experiments` to populate this table._
 
 ## 5. Limitations / threats to validity
 
-- **Synthetic data.** Effect sizes reflect the generator's assumptions (Gaussian rush
-  peaks, distance-decayed event uplift), not measured reality. Needs real-data replication.
+- **Synthetic effect sizes.** The synthetic testbed's effect sizes reflect the generator's
+  assumptions (Gaussian rush peaks, distance-decayed event uplift), not measured reality —
+  use them only as mechanism validation (§4.1), with real data as the headline (§4.1b).
 - **Model B ground truth.** On synthetic data Model B trains on the true effect; real data
-  has no such label, so the proxy-target approach (§2.5) must be validated.
+  has no such label, so the proxy-target approach (§2.5, cross-fitted per §2.12) must be
+  validated — e.g. check its score visibly rises around known large events.
+- **Concerts only — unlabeled events.** setlist.fm covers concerts; sports games, festivals,
+  and conventions at the same venues (SoFi, Dodger Stadium, Chase Center host all of these)
+  are *absent from the event table*. Their traffic still appears in the sensor data as
+  unexplained congestion for **both** A and A+, which adds noise and — because A+ gets no
+  feature for them either — should *dilute*, not inflate, the measured event gain. State this
+  direction-of-bias argument explicitly: the reported gain is a lower bound w.r.t. event
+  coverage.
+- **Event metadata assumptions.** Start time is assumed 20:00 local (setlist.fm is
+  date-only) and duration 3 h; venue **capacity** stands in for expected attendance (an upper
+  bound on turnout, but the right "known in advance" signal — §2.12). Venue coverage is the
+  24-entry reference table; concerts elsewhere are dropped.
+- **Detector coverage (LA).** 86.6 % of D7 mainline stations were dead (fully imputed) in the
+  study window, leaving ~54 healthy LA sensors vs ~82 for SF (§2.12, §4.0). The %Observed gate
+  is the honest choice, but it means the LA spatial coverage is thin and the effective dataset
+  is smaller than the raw row counts suggest — report the healthy-sensor counts, not the 954.
+- **Event-affected lens on real data.** Without ground truth, the subset is defined by the
+  event *window* (`in_event_window`), not by realized impact — a coarser lens that dilutes
+  the per-row gain relative to the synthetic threshold lens (§4.1b).
 - **Lag semantics vs resolution.** *Addressed.* Lags are now expressed in timesteps and tuned
   to the data resolution (`[1,2,3,4,96,672]` at 15-min → up to 1 h, 1 day, 1 week); §2.9.
-- **Single synthetic seed / no significance test.** *Addressed* by `scripts.run_stats`
+- **Single seed / no significance test.** *Addressed* by `scripts.run_stats`
   (rolling-origin CV × seeds + paired significance test and bootstrap CI on the A→A+ gap;
-  §2.13). The headline table (§4) is still a single default run for readability; regenerate its
-  numbers with the retuned lags before quoting them.
-- **Real-data effect sizes still pending.** The real-data path (PeMS + setlist.fm) is wired and
-  unit-tested, but the reported effect sizes are still synthetic — a real fetch + run is needed
-  to confirm the mechanism transfers (§6).
+  §2.13). The headline tables are single default runs for readability; the stats run is the
+  claim-bearing evidence.
 - **No spatial model.** Sensors are treated independently (no road-network topology); real
   traffic propagates spatially — a known gap vs spatio-temporal models [6].
 
@@ -315,11 +416,10 @@ _Run `uv run python -m scripts.run_experiments` to populate this table._
 
 ## 6. To be done (future work)
 
-1. **Real data.** *Loaders wired* — Caltrans PeMS 5-min → long parquet (`src/data/pems.py`,
-   with flow/speed/occupancy + `%Observed` gating) and a historical **setlist.fm** event source
-   with a venue-capacity reference table (`src/data/setlistfm.py`); `scripts.build_real_dataset`
-   assembles them. **Remaining:** run the actual fetch + A-vs-A+ on real PeMS D7/D4 and report
-   real effect sizes.
+1. **Real data.** *Fetched and built* (2026-07-12) — PeMS D7/D4 + setlist.fm with the venue
+   city-validation and per-show dedup gates; the cleaned dataset is described in §4.0.
+   **Remaining:** finish `run_all` + `run_stats` on the cleaned data and copy the numbers into
+   §4.1b / §4.2.
 2. **Validate Model B's proxy target** on real event days. Proxy is now **cross-fitted**
    (out-of-fold, §2.12); still needs checking that its score actually tracks real event uplift.
 3. **Statistical rigor.** *Done* — rolling-origin CV × seeds + paired significance test and
@@ -374,6 +474,11 @@ _Run `uv run python -m scripts.run_experiments` to populate this table._
 
 13. setlist.fm, "setlist.fm API (v1.0)," https://api.setlist.fm/docs/1.0/ (accessed 2026).
     (Historical concert database; supplies event date + venue for the training-window events.)
+
+14. V. Chernozhukov, D. Chetverikov, M. Demirer, E. Duflo, C. Hansen, W. Newey, and
+    J. Robins, "Double/Debiased Machine Learning for Treatment and Structural Parameters,"
+    *The Econometrics Journal*, vol. 21, no. 1, pp. C1–C68, 2018. (Cross-fitting /
+    out-of-fold prediction when a model's output feeds another model, as in §2.12.)
 
 *Optional / if used later:*
 12. G. Ke et al., "LightGBM: A Highly Efficient Gradient Boosting Decision Tree," in
