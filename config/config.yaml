@@ -1,0 +1,51 @@
+seed: 42
+
+data:
+  # Synthetic dataset shape (PeMS-style: traffic FLOW per sensor per timestamp).
+  n_sensors: 30
+  n_days: 90
+  freq: "15min"                 # pandas offset alias (1h = hourly). Use "15min" for finer.
+  start_date: "2025-01-01"
+  n_events: 120
+  # Bounding box for sensor & event locations (roughly LA metro, but arbitrary).
+  area:
+    lat_min: 34.00
+    lat_max: 34.20
+    lon_min: -118.35
+    lon_max: -118.10
+  raw_dir: "data/synthetic"
+  processed_dir: "data/processed"
+
+features:
+  lags: [1, 2, 3, 24, 168]   # in number of timesteps (with freq=1h => 1h,2h,3h,1d,1w)
+  rolling_windows: [3, 24]   # rolling mean/std windows (timesteps)
+  event_radius_km: 5.0       # sensors within this radius of an event are "exposed"
+
+model:
+  type: "random_forest"      # "random_forest" | "gradient_boosting" | "xgboost"
+  device: "auto"             # xgboost only: "auto" (GPU if available) | "cuda" | "cpu"
+  test_size: 0.2             # fraction of the timeline held out at the END (time-based split)
+  random_forest:
+    n_estimators: 300
+    max_depth: null
+    min_samples_leaf: 2
+    n_jobs: -1
+  gradient_boosting:
+    n_estimators: 400
+    learning_rate: 0.05
+    max_depth: 3
+  xgboost:                   # GPU-capable (set type: xgboost). Uses device above.
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 8
+    subsample: 0.9
+    colsample_bytree: 0.9
+
+benchmark:
+  # Models the benchmark sweep trains & compares (each run twice: A and A+).
+  # Add any model.type here (e.g. a future one) and it joins the comparison automatically.
+  models: ["random_forest", "gradient_boosting", "xgboost"]
+
+paths:
+  models_dir: "models"
+  results_dir: "results"
