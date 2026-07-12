@@ -21,12 +21,12 @@ dependencies = [
     "python-dotenv>=1.0",
     # Fetch the raw PeMS data from the published Google Drive folder (src/data/build_real.py).
     "gdown>=5.1",
+    # setlist.fm event fetch (src/data/setlistfm.py); real data is the default source.
+    "requests>=2.31",
     "scipy-stubs~=1.18.0",
 ]
 
 [project.optional-dependencies]
-# Fetching real events (setlist.fm historical API + Ticketmaster Discovery API)
-scrape = ["requests>=2.31"]
 # Alternative gradient-boosting backend
 boosting = ["lightgbm>=4.0"]
 dev = [

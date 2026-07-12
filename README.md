@@ -127,8 +127,8 @@ writes `media/results/benchmark.json` + `media/figures/benchmark.png`. Add a mod
 and it joins the comparison automatically. Data prep and Model B run once (they don't
 depend on the traffic model), so only runs A/A+ repeat per model.
 
-Optional extras: `uv sync --extra scrape` (setlist.fm event fetch deps),
-`uv sync --extra boosting` (lightgbm; xgboost is already a core dependency).
+Optional extra: `uv sync --extra boosting` (lightgbm; xgboost is already a core dependency).
+The setlist.fm/PeMS fetch deps (`requests`, `gdown`) are core, so no extra is needed for real data.
 
 ### Development tooling
 

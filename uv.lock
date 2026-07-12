@@ -163,6 +163,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "scipy-stubs" },
@@ -180,9 +181,6 @@ dev = [
     { name = "pytest" },
     { name = "types-pyyaml" },
 ]
-scrape = [
-    { name = "requests" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -199,14 +197,14 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "requests", marker = "extra == 'scrape'", specifier = ">=2.31" },
+    { name = "requests", specifier = ">=2.31" },
     { name = "scikit-learn", specifier = ">=1.4" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "scipy-stubs", specifier = "~=1.18.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "xgboost", specifier = ">=2.0" },
 ]
-provides-extras = ["scrape", "boosting", "dev"]
+provides-extras = ["boosting", "dev"]
 
 [[package]]
 name = "filelock"
