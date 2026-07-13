@@ -1,10 +1,14 @@
 seed: 42
 
 data:
-  # Synthetic dataset shape (PeMS-style: traffic FLOW per sensor per timestamp).
-  n_days: 90
+  # Synthetic dataset shape (PeMS-style: traffic FLOW per sensor per timestamp). Mirrors the
+  # real dataset (docs/thesis-notes.md §4.0): same 62-day window, same event counts per city,
+  # base_flow calibrated so per-sensor mean flow matches PeMS (mean flow is ~0.62 * base_flow
+  # under the daily/weekly profile). The sensor panel is a 1/3-scale subsample (real 2:3
+  # LA:SF ratio kept) so the full suite runs in minutes rather than hours.
+  n_days: 62
   freq: "15min"                 # pandas offset alias (1h = hourly). Use "15min" for finer.
-  start_date: "2025-01-01"
+  start_date: "2026-05-11"
   # Prediction target (the quantity the traffic model learns). PeMS provides all three;
   # synthetic data only has "flow", so keep "flow" unless running on real data.
   #   flow       -> vehicles per interval (default; matches the abstract's framing)
@@ -15,20 +19,24 @@ data:
   #   real      -> Caltrans PeMS (auto-fetched from Google Drive) + setlist.fm events (default)
   #   synthetic -> the generator in src/data/generate_synthetic.py (opt-in; controlled testbed
   #                with a KNOWN ground-truth event effect, useful for validation/tests)
+  # This flag also picks the directory tree: with "synthetic", inputs/processed move to
+  # *_synthetic siblings and models/results/figures to a synthetic/ subdir (see src/config.py),
+  # so the two datasets' artifacts never overwrite each other and this is the ONLY line to
+  # change when switching.
   source: "real"                 # "real" | "synthetic"
   # Two cities so the cross-city (LA -> SF) split is possible. Different base_flow ranges
   # (LA busier than SF) make per-sensor normalization actually matter. Coordinates are the
   # real LA / SF metros so this maps cleanly onto real PeMS D7 / D4 data later.
   cities:
     - name: "LA"
-      n_sensors: 20
-      n_events: 80
-      base_flow: [300, 1400]
+      n_sensors: 18
+      n_events: 105
+      base_flow: [830, 2230]
       area: {lat_min: 34.00, lat_max: 34.20, lon_min: -118.35, lon_max: -118.10}
     - name: "SF"
-      n_sensors: 15
-      n_events: 60
-      base_flow: [150, 900]
+      n_sensors: 27
+      n_events: 59
+      base_flow: [610, 1900]
       area: {lat_min: 37.70, lat_max: 37.85, lon_min: -122.48, lon_max: -122.38}
   inputs_dir: "data/processed_inputs"   # flow/events/sensors parquet the pipeline reads
   processed_dir: "data/processed"       # cached feature matrix (dataset.parquet)

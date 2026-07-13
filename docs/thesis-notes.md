@@ -288,59 +288,124 @@ Built 2026-07-12 with all data-quality gates of §2.12 in place:
   `experiments.json`, `stats.json`) and `media/figures/`; the experiment-matrix table in
   §4.2 is rewritten automatically by `scripts.run_experiments` / `scripts.run_all`.
 
-> ⚠️ **Do not quote any real-data numbers produced before 2026-07-12** — they were computed
-> on the contaminated events table (and Model B's cross-fitting was shuffled rather than
-> time-blocked). Regenerate everything with
-> `uv run python -m scripts.run_all && uv run python -m scripts.run_stats`
-> and copy the fresh numbers from `media/results/` into §4.1b below.
+> ✅ **Regenerated 2026-07-13**: `run_all` + `run_stats` completed on the cleaned dataset;
+> §4.1b and §4.2 below hold the numbers from that run. (Real-data numbers produced before
+> 2026-07-12 remain invalid — contaminated events table, shuffled cross-fitting — do not
+> quote them.)
 
 ### 4.1 Mechanism validation on the synthetic testbed
 
-Full run: 35 sensors, 90 days at 15-minute resolution; 140 events; ~3.6 % of rows
-event-affected. Time-based 80/20 split. Metric shown = MAE (vehicles/interval).
+Regenerated 2026-07-13 on a testbed that **mirrors the real dataset** (§4.0): same 62-day
+window (2026-05-11 start) at 15-minute resolution, same event counts (105 LA + 59 SF = 164),
+per-sensor mean flow calibrated to the real PeMS distribution, and a 1/3-scale sensor panel
+(18 LA + 27 SF = 45, keeping the real 2:3 city ratio) so the suite runs in minutes. 267,840
+raw rows; 6.1 % event-affected by ground truth (real data: 6.4 % by window lens) — so the
+dilution of the overall metric is comparable across the two settings. Time-based 80/20
+split; metric = MAE (vehicles/interval).
 
-> ⚠️ **Stale after the lag retune (§2.9).** The per-model table below predates the
-> resolution-tuned lags; regenerate it (set `data.source: synthetic`, then
-> `uv run python -m scripts.run_all`) before quoting. As a spot check, a fresh default
-> Random Forest run with the new lags gives A MAE 30.46 →
-> A+ 30.12 overall (**+1.1 %**) and 48.91 → 41.53 on event-affected rows (**+15.1 %**) — a
-> *larger* event gain than the old numbers, i.e. the retune helped.
+**Model B on the ground-truth target: R² = 0.76** (MAE 0.009). This is the number to hold
+against the real-data proxy target's R² ≈ 0.00 (§4.1b): identical architecture and
+features — the difference is entirely whether a learnable event signal exists in the target.
 
 | Model | A MAE (all) | A+ MAE (all) | Δ% all | A MAE (event) | A+ MAE (event) | Δ% event | infer ms/1k |
 |-------|------------:|-------------:|-------:|--------------:|---------------:|---------:|------------:|
-| Random Forest | 28.68 | 28.52 | 0.54 % | 65.14 | 62.45 | 4.13 % | 16.38 |
-| Gradient Boosting | 36.83 | 36.84 | −0.03 % | 67.07 | 62.64 | 6.61 % | 2.87 |
-| XGBoost (GPU) | 28.68 | 28.38 | 1.03 % | 69.63 | 61.13 | **12.20 %** | **0.67** |
+| Random Forest | 62.85 | 61.52 | 2.13 % | 126.28 | 107.11 | **15.18 %** | 22.39 |
+| Gradient Boosting | 67.61 | 65.74 | 2.77 % | 135.30 | 107.92 | **20.23 %** | 2.09 |
+| XGBoost (GPU) | 60.81 | 59.03 | 2.93 % | 121.18 | 98.97 | **18.33 %** | **0.67** |
+
+**Significance** (`scripts.run_stats`, rolling-origin CV, 4 folds × 3 seeds, RF; gap =
+A − A+ so positive = A+ better):
+
+- EVENT-AFFECTED: mean MAE gap **+16.61** [+13.19, +19.68], t-p < 0.0001,
+  Wilcoxon p = 0.0005 → **SIGNIFICANT**.
+- OVERALL: mean MAE gap **+1.41** [+1.10, +1.67], t-p < 0.0001, Wilcoxon p = 0.0005 →
+  **SIGNIFICANT**.
+- Every one of the 12 fold × seed cells improves, with near-identical values across seeds
+  within each fold — the gain is neither estimator randomness nor a single lucky period.
 
 **Interpretation for the write-up.**
 - The event feature helps **on event-affected rows across all three model families**
-  (+4.1 % / +6.6 % / +12.2 % MAE reduction) — the hypothesis holds and is robust to model
-  choice, which is a stronger result than a single-model demonstration.
-- Overall (whole-test) gains are small (0–1 %) *by construction*: only ~3.8 % of rows are
-  event-affected, so the aggregate dilutes a locally large effect. This motivates the
+  (+15.2 % / +20.2 % / +18.3 % MAE reduction), and the RF gain is statistically significant
+  under the same CV × seeds protocol that returns a null on real data (§4.1b). The
+  hypothesis holds and is robust to model choice.
+- Overall gains are small (2–3 %) *by construction*: only ~6 % of rows are event-affected,
+  so the aggregate dilutes a locally large effect. This motivates the
   event-affected-subset lens (§2.8).
-- XGBoost is both **most accurate on event rows and fastest** (0.67 vs 16.4 ms/1k),
+- The headline RF run (`metrics.json`) also shows the reliability metrics moving the right
+  way on event rows: p95 absolute error 444 → 383, event-subset R² 0.914 → 0.933.
+- XGBoost is both **most accurate on event rows and fastest** (0.67 vs 22.4 ms/1k),
   supporting the response-time criterion and giving a concrete CPU-vs-GPU discussion point.
-- These are effect sizes *on synthetic data*; treat them as evidence the mechanism works,
-  not as real-world magnitudes (§5).
+- These are effect sizes *on synthetic data* with a generator-injected effect; treat them
+  as evidence the mechanism works, not as real-world magnitudes (§5). The matched shape
+  (window, event density, flow scale) makes the synthetic-vs-real contrast in §4.1b a
+  controlled comparison rather than an apples-to-oranges one.
 
-Metric artifacts: `media/results/benchmark.json`, `media/results/metrics.json`.
+Artifacts (kept separate from the real-data results): `media/results/synthetic/`
+(`benchmark.json`, `metrics.json`, `stats.json`) and `media/figures/synthetic/` — including
+the three ground-truth-only figures (`event_effect_hist`, `error_vs_event_effect`,
+`event_window_sensor`) that cannot be produced on real data (§4.1c).
 
-### 4.1b Real-data results (headline — fill in after the regeneration run)
+### 4.1b Real-data results (headline) — a null result, honestly reported
 
-Copy from `media/results/` once `run_all` + `run_stats` complete on the cleaned dataset:
+Run of 2026-07-13 on the cleaned dataset (§4.0), `run_all` + `run_stats`. The short version:
+**on real data the event feature does not improve prediction.** The synthetic testbed (§4.1)
+shows the *mechanism* works when a real event signal exists; the real-data experiment shows
+the current pipeline fails to extract such a signal from concerts + freeway sensors. The
+evidence, in causal order:
 
-| Source file | What to quote |
-|---|---|
-| `metrics.json` | headline A vs A+ (default RF): MAE/RMSE/MAPE/R², overall + event-window subset |
-| `benchmark.json` | the §4.1-style per-model table (RF / GB / XGBoost, Δ% + latency) |
-| `stats.json` | mean MAE gap ± bootstrap CI, t-test / Wilcoxon p, per lens — the "significant?" claim |
-| `experiments.json` | auto-rendered into §4.2 below |
+- **Model B learns nothing.** In every condition of the experiment matrix, Model B's fit on
+  its cross-fitted proxy-residual target is **R² ≈ 0.00** (range −0.001 to +0.001). The
+  `event_impact_score` handed to A+ is therefore approximately noise, and every downstream
+  A-vs-A+ delta must be read in that light. This is the root cause of everything below.
+- **Headline comparison** (default RF, time split; `metrics.json`): overall MAE
+  57.96 → 57.91 (**+0.10 %**), RMSE 90.64 → 90.53, R² = 0.970 for both runs. On the 3,570
+  event-window rows (6.4 % of the 55,746 test rows): MAE 74.99 → 75.15 (**−0.22 %**) — A+
+  is slightly *worse* exactly where the hypothesis predicts it should be better.
+- **Significance run** (`stats.json`; rolling-origin CV, 4 folds × 3 seeds, RF; gap = A − A+
+  so positive = A+ better):
+  - OVERALL: mean MAE gap **+0.001** [−0.42, +0.45], t-p = 0.996 — indistinguishable from 0.
+  - EVENT-AFFECTED: mean MAE gap **−4.23** [−8.56, −0.19], t-p = 0.074, Wilcoxon p = 0.009.
+    The negative sign means A+ is on average *worse* on event rows. The printed verdict is
+    "not significant" only because the criterion is one-directional (requires an
+    improvement CI); read honestly, there is no evidence of benefit and weak-to-moderate
+    evidence of harm on the event subset.
+  - The event-subset harm is driven almost entirely by **fold 1**, where A scores ≈ 48.6
+    MAE and A+ jumps to 64–67 across all three seeds; the other three folds sit near zero
+    gap. Before writing the discussion chapter, diagnose fold 1 (which dates it covers,
+    which events fall in it) — a noise feature that occasionally *destabilizes* the model
+    is itself a reportable failure mode.
+- **MAPE is unusable on this data** (values in the 10⁶–10⁹ % range): near-zero night-time
+  flow puts ≈0 in the denominator. Quote MAE / RMSE / R² and drop MAPE from real-data
+  tables, or replace it with WAPE / sMAPE.
+- `benchmark.json` was **not** regenerated in this run — do not quote it next to these
+  numbers.
 
-Note when interpreting: on real data the "event-affected" lens is `in_event_window == 1`
-(inside `[start − lead, end + 1 h]` of a nearby event) — a *coarser* lens than the synthetic
-ground-truth-effect threshold, since there is no true label (§2.5). Expect it to dilute the
-measured gain relative to the synthetic setting, not inflate it.
+Note on the lens: on real data "event-affected" means `in_event_window == 1` (inside
+`[start − lead, end + 1 h]` of a nearby event) — a coarser lens than the synthetic
+ground-truth threshold, since there is no true label (§2.5). It dilutes a real gain rather
+than inflating one, but it cannot explain a *negative* event-window delta.
+
+**How to use this in the thesis.** Yes, this is usable — a null result with a diagnosed
+cause is a legitimate, defensible contribution; do not spin it. The clean framing is a
+two-part story:
+
+1. *Mechanism validation (synthetic, §4.1):* when a ground-truth event effect exists in the
+   data, the two-stage architecture detects and exploits it (+15–20 % on event rows across
+   three model families, significant at p < 0.001 under the same CV × seeds protocol, on a
+   testbed matched to the real dataset's window, event density, and flow scale). The design
+   is sound.
+2. *Real-data finding:* with concerts-only event coverage, a coarse window lens, freeway
+   mainline sensors, a 62-day window, and a proxy target the impact model cannot learn
+   (R² ≈ 0), the event feature adds no measurable value overall and may destabilize
+   event-window predictions. The gap between (1) and (2) localizes the failure to the
+   *signal-extraction* step (Model B's target), not the architecture — which directly
+   motivates the future-work items in §6.
+
+Candidate explanations for why the proxy target is unlearnable, for the discussion chapter:
+the residual of a strong lag model is mostly irreducible noise; concerts may barely move
+*freeway mainline* flow (attendees load arterials and parking streets near venues, which
+PeMS mainline detectors don't see); 164 events in 62 days is a thin training signal; and
+the assumed 20:00 start time / 3 h duration blurs the true event windows.
 
 ### 4.1c Figures (generated by `scripts.run_visuals` → `media/figures/`)
 
@@ -362,8 +427,10 @@ as a code snippet in the thesis). Suggested placement in the paper:
 
 Note: `event_effect_hist.png`, `error_vs_event_effect.png`, and `event_window_sensor.png`
 need the ground-truth event effect, so they are only produced on the **synthetic** testbed
-(the run skips them on real data and says so). Generate them once from a synthetic run for
-the methodology/mechanism chapter; the rest regenerate on real data.
+(the run skips them on real data and says so). The full synthetic set (all ten figures) was
+generated 2026-07-13 into `media/figures/synthetic/`; the real-data figures live in
+`media/figures/`. Use the synthetic versions for the methodology/mechanism chapter and the
+real ones for the results chapter.
 
 ### 4.2 Experiment matrix
 
@@ -372,8 +439,40 @@ Every combination of `split × normalize × model` is run separately by
 which configuration gives the largest event-affected accuracy gain, per condition.
 
 <!-- EXPERIMENTS:START -->
-_Run `uv run python -m scripts.run_experiments` to populate this table._
+
+| split | normalize | model | MAE A | MAE A+ | Δ% overall | MAE A (event) | MAE A+ (event) | **Δ% event** | infer ms/1k |
+|---|---|---|--:|--:|--:|--:|--:|--:|--:|
+| time | none | random_forest | 57.96 | 57.91 | +0.10% | 74.99 | 75.20 | **-0.28%** | 28.71 |
+| time | none | gradient_boosting | 59.87 | 59.76 | +0.18% | 75.34 | 75.19 | **+0.21%** | 1.87 |
+| time | none | xgboost | 56.76 | 56.82 | -0.09% | 72.91 | 73.06 | **-0.20%** | 0.52 |
+| time | per_sensor | random_forest | 57.81 | 57.80 | +0.01% | 73.99 | 74.43 | **-0.59%** | 29.60 |
+| time | per_sensor | gradient_boosting | 59.28 | 59.24 | +0.07% | 75.51 | 75.50 | **+0.01%** | 2.01 |
+| time | per_sensor | xgboost | 56.94 | 57.22 | -0.50% | 73.05 | 72.82 | **+0.32%** | 0.51 |
+| city | none | random_forest ⭐ | 57.86 | 56.33 | +2.65% | 87.39 | 83.05 | **+4.97%** | 15.51 |
+| city | none | gradient_boosting | 58.07 | 57.05 | +1.75% | 70.21 | 75.58 | **-7.65%** | 2.95 |
+| city | none | xgboost | 56.75 | 56.51 | +0.41% | 76.26 | 84.64 | **-11.00%** | 0.26 |
+| city | per_sensor | random_forest | 59.29 | 57.67 | +2.73% | 88.56 | 87.63 | **+1.05%** | 18.94 |
+| city | per_sensor | gradient_boosting | 56.68 | 55.47 | +2.14% | 67.78 | 75.95 | **-12.05%** | 2.67 |
+| city | per_sensor | xgboost | 54.66 | 55.56 | -1.64% | 77.19 | 92.41 | **-19.71%** | 0.25 |
+
+**Best configuration per condition** (largest event-affected MAE reduction):
+
+- *Within-city (time split):* `xgboost` + normalize=`per_sensor` → +0.32% on event rows.
+- *Cross-city transfer (LA→SF):* `random_forest` + normalize=`none` → +4.97% on event rows.
+
+Δ% = MAE reduction from baseline A to event-aware A+ (higher is better). The event feature helps most on event-affected rows; ⭐ = best cell overall.
+
 <!-- EXPERIMENTS:END -->
+
+**Reading the matrix honestly (2026-07-13 run).** The time-split event deltas (−0.59 % to
++0.32 %) are within run-to-run noise. The city-split deltas swing from +4.97 % to −19.71 %
+and flip sign across models and normalizations — that is instability of the LA→SF transfer
+setting, not an event effect: an uninformative extra feature (Model B's R² ≈ 0, §4.1b)
+perturbs each estimator differently under distribution shift. Note also the mixed pattern
+that overall MAE often *improves* under the city split while event-window MAE worsens — the
+opposite of the hypothesis, which predicts the gain concentrates on event rows. No cell in
+this table supports a benefit claim; do not quote the ⭐ cell in isolation (the boilerplate
+caption below the table is auto-generated and predates this finding).
 
 ---
 
@@ -382,9 +481,12 @@ _Run `uv run python -m scripts.run_experiments` to populate this table._
 - **Synthetic effect sizes.** The synthetic testbed's effect sizes reflect the generator's
   assumptions (Gaussian rush peaks, distance-decayed event uplift), not measured reality —
   use them only as mechanism validation (§4.1), with real data as the headline (§4.1b).
-- **Model B ground truth.** On synthetic data Model B trains on the true effect; real data
-  has no such label, so the proxy-target approach (§2.5, cross-fitted per §2.12) must be
-  validated — e.g. check its score visibly rises around known large events.
+- **Model B proxy target failed to validate on real data.** On synthetic data Model B
+  trains on the true effect; real data has no such label, and the cross-fitted
+  proxy-residual target (§2.5, §2.12) turned out to be **unlearnable in practice**:
+  R² ≈ 0.00 in every experiment condition (§4.1b). The `event_impact_score` is therefore
+  ~noise on real data, which caps everything A+ can show and is the diagnosed cause of the
+  real-data null result. See §4.1b for candidate explanations and §6 for what to try next.
 - **Concerts only — unlabeled events.** setlist.fm covers concerts; sports games, festivals,
   and conventions at the same venues (SoFi, Dodger Stadium, Chase Center host all of these)
   are *absent from the event table*. Their traffic still appears in the sensor data as
@@ -416,12 +518,18 @@ _Run `uv run python -m scripts.run_experiments` to populate this table._
 
 ## 6. To be done (future work)
 
-1. **Real data.** *Fetched and built* (2026-07-12) — PeMS D7/D4 + setlist.fm with the venue
-   city-validation and per-show dedup gates; the cleaned dataset is described in §4.0.
-   **Remaining:** finish `run_all` + `run_stats` on the cleaned data and copy the numbers into
-   §4.1b / §4.2.
-2. **Validate Model B's proxy target** on real event days. Proxy is now **cross-fitted**
-   (out-of-fold, §2.12); still needs checking that its score actually tracks real event uplift.
+1. **Real data.** *Done* (2026-07-13) — dataset built (§4.0) and all numbers regenerated
+   (§4.1b, §4.2). Outcome: a null result on real data with a diagnosed cause; §4.1b gives
+   the two-part framing for the thesis.
+2. **Validate Model B's proxy target** on real event days. *Done — validation failed*:
+   R² ≈ 0 in every condition (§4.1b, §5), so the score does not track real event uplift.
+   If a positive real-data result is wanted, the highest-leverage next steps are:
+   (a) drop the two-stage score and feed the raw event features (distance to venue,
+   hours-to-event, attendance, pre-event pressure) **directly into A+** — this removes the
+   unlearnable intermediate target entirely; (b) verify event/sensor overlap in space and
+   time (do any healthy sensors sit on venue approach routes?); (c) try
+   `data.target: speed` or `occupancy`, where event effects may be more visible than in
+   mainline flow; (d) diagnose the fold-1 instability from the stats run (§4.1b).
 3. **Statistical rigor.** *Done* — rolling-origin CV × seeds + paired significance test and
    bootstrap CI (`scripts.run_stats`, §2.13).
 4. **Retune features** to the data resolution (lags, rolling windows). *Done* — lags are now

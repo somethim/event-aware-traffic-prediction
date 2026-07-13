@@ -68,6 +68,16 @@ def resolve(*parts: str) -> Path:
 # Paths used across modules ----------------------------------------------------
 CFG = load_config()
 
+# data.source is the single switch between the real and synthetic datasets: when it is
+# "synthetic", every input/output directory moves to a synthetic-suffixed sibling, so
+# flipping the flag never requires editing paths and neither run clobbers the other's
+# artifacts.
+if CFG["data"].get("source", "real") == "synthetic":
+    CFG["data"]["inputs_dir"] += "_synthetic"
+    CFG["data"]["processed_dir"] += "_synthetic"
+    for _key in ("models_dir", "results_dir", "figures_dir"):
+        CFG["paths"][_key] += "/synthetic"
+
 # All data/output directories hang off this root. Tests set EATP_DATA_ROOT to a temp dir so
 # running the suite never reads or overwrites real data under the repo. Because every path
 # constant below (and the copies other modules import) derives from it, the override reaches
