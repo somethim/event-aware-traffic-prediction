@@ -12,11 +12,6 @@ data/raw/*
 data/processed/*
 data/processed_inputs/*
 models/*
-media/results/*
-media/figures/*
-
-# ...but keep the folders themselves
-!**/.gitkeep
 
 # Secrets
 .env
