@@ -8,11 +8,12 @@ import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
-def mape(y_true, y_pred, eps: float = 1e-6) -> float:
-    """Mean absolute percentage error (%). eps guards against dividing by zero."""
+def wape(y_true, y_pred) -> float:
+    """Weighted absolute percentage error (%), defined even for individual zero flows."""
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
-    return float(np.mean(np.abs((y_true - y_pred) / np.maximum(np.abs(y_true), eps))) * 100)
+    denom = np.abs(y_true).sum()
+    return float(np.abs(y_true - y_pred).sum() / denom * 100) if denom else float("nan")
 
 
 def regression_metrics(y_true, y_pred) -> dict:
@@ -23,19 +24,26 @@ def regression_metrics(y_true, y_pred) -> dict:
     return {
         "MAE": float(mean_absolute_error(y_true, y_pred)),
         "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
-        "MAPE": mape(y_true, y_pred),
+        "WAPE": wape(y_true, y_pred),
         "R2": float(r2_score(y_true, y_pred)),
         # Reliability is captured by the worst-case and tail error below.
-        "max_abs_error": float(err.max()),
         "p95_abs_error": float(np.percentile(err, 95)),
         "n": int(len(y_true)),
     }
 
 
-def timed_predict(model, x):
-    """Return predictions plus latency in ms per 1000 rows, the 'response time' criterion."""
-    t0 = time.perf_counter()
-    preds = model.predict(x)
-    dt = time.perf_counter() - t0
-    per_1k = dt / max(len(x), 1) * 1000 * 1000
-    return preds, per_1k
+def timed_predict(model, x, repeats: int = 5):
+    """Warm up, then report repeated inference timing instead of a one-off measurement."""
+    model.predict(x.iloc[: min(len(x), 1000)])
+    samples = []
+    preds = None
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        preds = model.predict(x)
+        samples.append((time.perf_counter() - t0) / max(len(x), 1) * 1_000_000)
+    return preds, {
+        "inference_ms_per_1k_mean": float(np.mean(samples)),
+        "inference_ms_per_1k_std": float(np.std(samples, ddof=1)) if repeats > 1 else 0.0,
+        "repeats": repeats,
+        "batch_size": int(len(x)),
+    }

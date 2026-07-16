@@ -1,0 +1,23 @@
+seed: 42
+data:
+  source: synthetic
+  n_days: 21
+  freq: 15min
+  start_date: '2026-05-11'
+  target: flow
+  cities:
+    - {name: LA, n_sensors: 6, n_events: 12, base_flow: [830, 2230], area: {lat_min: 34.00, lat_max: 34.20, lon_min: -118.35, lon_max: -118.10}}
+    - {name: SF, n_sensors: 6, n_events: 12, base_flow: [610, 1900], area: {lat_min: 37.70, lat_max: 37.85, lon_min: -122.48, lon_max: -122.38}}
+  inputs_dir: data/processed_inputs
+  processed_dir: data/processed
+features: {lags: [1, 2, 3, 4, 96, 672], rolling_windows: [4, 96], event_radius_km: 5.0, event_lead_hours: 3.0}
+model:
+  type: random_forest
+  device: cpu
+  normalize: none
+  cross_fit_folds: 5
+  split: {mode: time, time_size: 0.2, train_city: LA, test_city: SF}
+  random_forest: {n_estimators: 80, max_depth: null, min_samples_leaf: 2, n_jobs: -1}
+  xgboost: {n_estimators: 100, learning_rate: 0.05, max_depth: 6, subsample: 0.9, colsample_bytree: 0.9}
+evaluation: {seeds: [42], cv: {n_folds: 1, test_days: 7}, alpha: 0.05, n_bootstrap: 500}
+paths: {models_dir: models, results_dir: media/results, figures_dir: media/figures, runs_dir: runs}

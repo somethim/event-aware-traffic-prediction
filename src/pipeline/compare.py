@@ -36,7 +36,7 @@ def _block(df: pd.DataFrame, y: str) -> dict:
 
 
 def _improvement(a: dict, b: dict) -> dict:
-    return {k: round(100 * (a[k] - b[k]) / a[k], 2) for k in ("MAE", "RMSE", "MAPE") if a[k] != 0}
+    return {k: round(100 * (a[k] - b[k]) / a[k], 2) for k in ("MAE", "RMSE", "WAPE") if a[k] != 0}
 
 
 def _event_affected(df: pd.DataFrame) -> pd.DataFrame:

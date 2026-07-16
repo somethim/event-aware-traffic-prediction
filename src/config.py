@@ -6,6 +6,8 @@ time so secrets are never hard-coded.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -15,7 +17,7 @@ from dotenv import load_dotenv
 
 # Repo root is two levels up from this file (src/config.py -> src -> repo root).
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = ROOT / "config" / "config.yaml"
+CONFIG_PATH = Path(os.environ.get("EATP_CONFIG", ROOT / "config" / "config.yaml")).resolve()
 
 # Load .env if present. Real environment variables take precedence over the file.
 load_dotenv(ROOT / ".env")
@@ -35,6 +37,12 @@ def load_config(path: str | Path = CONFIG_PATH) -> dict[str, Any]:
     """Load the YAML config as a plain dict."""
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def config_checksum(cfg: dict[str, Any]) -> str:
+    """Stable SHA-256 of the effective configuration."""
+    payload = json.dumps(cfg, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 # Prediction target ------------------------------------------------------------
@@ -83,6 +91,16 @@ if CFG["data"].get("source", "real") == "synthetic":
 # constant below (and the copies other modules import) derives from it, the override reaches
 # the whole pipeline from this one place.
 DATA_ROOT = Path(os.environ.get("EATP_DATA_ROOT") or ROOT)
+
+# Claim-bearing runners set EATP_RUN_ID. This prevents an incomplete or stale run from
+# overwriting another run; the verified pointer is updated only by the orchestration layer.
+RUN_ID = os.environ.get("EATP_RUN_ID")
+if RUN_ID:
+    CFG["paths"] = dict(CFG["paths"])
+    base = Path(CFG["paths"].get("runs_dir", "runs")) / RUN_ID
+    CFG["paths"]["models_dir"] = str(base / "models")
+    CFG["paths"]["results_dir"] = str(base / "results")
+    CFG["paths"]["figures_dir"] = str(base / "figures")
 
 INPUTS_DIR = DATA_ROOT / CFG["data"]["inputs_dir"]
 PROCESSED_DIR = DATA_ROOT / CFG["data"]["processed_dir"]

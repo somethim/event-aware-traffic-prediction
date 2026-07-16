@@ -1,0 +1,28 @@
+seed: 42
+data:
+  source: real
+  freq: 15min
+  target: flow
+  inputs_dir: data/processed_inputs
+  processed_dir: data/processed
+  real:
+    gdrive_archive_url: https://drive.google.com/file/d/1_XDB1xAqcZmLOO6AoP6-71cjQdyDAv_S/view?usp=sharing
+    gdrive_folder_url: https://drive.google.com/drive/folders/185pO7uEMj22rbCE69SsQ7C5Ef5WP_XnK
+    pems_root: data/raw/pems
+    pems_dirs: {LA: data/raw/pems/7, SF: data/raw/pems/4}
+    timezone: America/Los_Angeles
+    station_buffer_km: 3.0
+    min_observed: 0.5
+    refresh_events: true
+    setlistfm: {default_start_hour: 20, default_duration_h: 3.0, cities: [LA, SF]}
+features: {lags: [1, 2, 3, 4, 96, 672], rolling_windows: [4, 96], event_radius_km: 5.0, event_lead_hours: 3.0}
+model:
+  type: random_forest
+  device: auto
+  normalize: none
+  cross_fit_folds: 5
+  split: {mode: time, time_size: 0.2, train_city: LA, test_city: SF}
+  random_forest: {n_estimators: 300, max_depth: null, min_samples_leaf: 2, n_jobs: -1}
+  xgboost: {n_estimators: 500, learning_rate: 0.05, max_depth: 8, subsample: 0.9, colsample_bytree: 0.9}
+evaluation: {seeds: [42, 43, 44], cv: {n_folds: 5, test_days: 7}, alpha: 0.05, n_bootstrap: 2000}
+paths: {models_dir: models, results_dir: media/results, figures_dir: media/figures, runs_dir: runs}

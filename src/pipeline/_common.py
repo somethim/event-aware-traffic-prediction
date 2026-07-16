@@ -7,6 +7,7 @@ is what keeps the A vs A+ comparison fair.
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 import joblib
 
@@ -26,7 +27,7 @@ def train_eval_traffic(
 ) -> dict:
     """Fit the configured traffic model on `feats`, evaluate on the held-out test split,
     persist the model and the test-set predictions, and return the metrics."""
-    df = load_dataset()
+    df = load_dataset(cfg)
     for col in require_cols or []:
         if col not in df.columns:
             raise RuntimeError(f"required column {col!r} missing — did an earlier stage run?")
@@ -35,14 +36,16 @@ def train_eval_traffic(
     tgt = target_column(cfg)
 
     model = build_model(cfg)
+    train_started = time.perf_counter()
     model.fit(train[feats], train["target"])
+    training_seconds = time.perf_counter() - train_started
 
     # Predictions come out in the (possibly per-sensor-normalized) target space. Invert them to
     # real units so the metrics are comparable no matter how normalization is configured.
     preds_norm, latency = timed_predict(model, test[feats])
     preds = preds_norm * test["flow_scale"].to_numpy()
     metrics = regression_metrics(test[tgt], preds)
-    metrics["inference_ms_per_1k"] = latency
+    metrics["timing"] = {**latency, "training_seconds": training_seconds}
 
     joblib.dump(model, model_file)
     # Keep only what compare and the figures need. in_event_window flags the event-affected subset

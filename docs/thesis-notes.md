@@ -8,6 +8,26 @@ references. Reference markers like `[1]` point to the **References** section at 
 > can locate each source. **Verify exact page numbers, DOIs, and access dates before final
 > submission** and reformat to your required citation style (IEEE / APA / etc.).
 
+> **Result status (2026-07-16):** legacy files under `media/results/` are stale and are not
+> claim-bearing. A result is verified only under `runs/<run_id>/`, with matching checksums in
+> `run_manifest.json` and `runs/latest-verified` pointing to it. Final dataset counts must be
+> rendered from that manifest, never maintained manually here.
+
+## Reproducibility commands for final tables
+
+```bash
+uv run python -m scripts.run_synthetic_smoke --config config/synthetic.yaml
+uv run python -m scripts.run_sample_study --config config/sample.yaml
+uv run python -m scripts.run_real_thesis --config config/real.yaml
+uv run pytest -q
+uv run mypy
+uv run black --check src scripts tests
+```
+
+The real runner uses five non-overlapping seven-day rolling-origin test blocks and averages
+three seeds within each fold before inference. Its +7-day placebo preserves event locations
+and metadata. A null or negative A-versus-A+raw result remains the thesis result.
+
 ---
 
 ## 1. Research framing
@@ -16,12 +36,16 @@ references. Reference markers like `[1]` point to the **References** section at 
   predictor improve accuracy, especially during event-driven congestion?
 - **Hypothesis.** Event features (location, time, expected popularity) improve prediction
   accuracy, most visibly where congestion is externally driven by events.
-- **Method.** Hold the model fixed and vary only the feature set:
+- **Forecast task.** Measurements available through *t−15 minutes* predict the target for
+  interval *t*. Planned-event metadata is assumed published before prediction.
+- **Confirmatory method.** Hold the model, rows, split, seed, and hyperparameters fixed and vary
+  only the feature set:
   - **Run A (baseline):** historical/temporal traffic features only.
-  - **Run A+ (event-aware):** the same features **plus** an event-impact score.
-  - Compare A vs A+ on an identical held-out test set.
-- **Two-model design.** A second model (**Model B**) converts raw event metadata into the
-  scalar event-impact score that A+ consumes. So Model B → feeds A+; A vs A+ is the test.
+  - **Run A+raw (event-aware):** the same features plus raw planned-event exposure fields.
+  - A versus A+raw is the sole primary comparison. Other feature groups, Model B, alternate
+    targets, and cross-city transfer are ablations or exploratory analyses.
+- **Model B diagnostic.** Its residual target is an exploratory proxy also affected by
+  incidents, weather, sensor noise, and omitted events; it is not the primary treatment.
 
 ---
 
@@ -32,7 +56,7 @@ Each subsection is a *decision point* you can cite/justify in the methodology ch
 ### 2.1 Target variable = traffic *flow* (volume), configurable to speed/occupancy
 Predicting flow (vehicles per interval per sensor) matches loop-detector benchmark data
 (Caltrans PeMS / PEMS-BAY) [7, 8] and the abstract's framing. Flow is a continuous value →
-a **regression** problem, evaluated with MAE / RMSE / MAPE / R² [9].
+a **regression** problem, evaluated with MAE / RMSE / WAPE / R² and p95 absolute error [9].
 
 *Caveat and configurability (real data).* Flow is **non-monotonic** in congestion: as a road
 approaches gridlock, flow first rises then *falls* (fewer vehicles pass a jammed point), so a
@@ -51,8 +75,8 @@ and both write the identical schema so the model/feature code is source-agnostic
 - *Why the synthetic testbed is methodologically useful:* the generator injects a **known
   ground-truth event effect** into flow, so there is a measurable signal for Model B to learn
   and for the A-vs-A+ comparison to reveal. A model blind to events cannot explain the injected
-  spikes; an event-aware one can. This isolates and *proves the mechanism* in a setting where the
-  answer is known — which the real data, lacking a ground-truth event label, cannot.
+  spikes; an event-aware one can. This establishes only that the implementation recovers its
+  generator-injected effect under the generator's assumptions; it is not real-world evidence.
 - *Its threat:* synthetic effect sizes reflect the generator's assumptions, not reality — hence
   real data is now the headline source, with synthetic as validation. See §5 and §6.
 
@@ -295,55 +319,58 @@ Built 2026-07-12 with all data-quality gates of §2.12 in place:
 
 ### 4.1 Mechanism validation on the synthetic testbed
 
-Regenerated 2026-07-13 on a testbed that **mirrors the real dataset** (§4.0): same 62-day
-window (2026-05-11 start) at 15-minute resolution, same event counts (105 LA + 59 SF = 164),
-per-sensor mean flow calibrated to the real PeMS distribution, and a 1/3-scale sensor panel
-(18 LA + 27 SF = 45, keeping the real 2:3 city ratio) so the suite runs in minutes. 267,840
-raw rows; 6.1 % event-affected by ground truth (real data: 6.4 % by window lens) — so the
-dilution of the overall metric is comparable across the two settings. Time-based 80/20
-split; metric = MAE (vehicles/interval).
+Verified sample run **`sample-20260716T165613Z`**, produced with:
 
-**Model B on the ground-truth target: R² = 0.76** (MAE 0.009). This is the number to hold
-against the real-data proxy target's R² ≈ 0.00 (§4.1b): identical architecture and
-features — the difference is entirely whether a learnable event signal exists in the target.
+```bash
+uv run python -m scripts.run_sample_study --config config/sample.yaml
+```
 
-| Model | A MAE (all) | A+ MAE (all) | Δ% all | A MAE (event) | A+ MAE (event) | Δ% event | infer ms/1k |
-|-------|------------:|-------------:|-------:|--------------:|---------------:|---------:|------------:|
-| Random Forest | 62.85 | 61.52 | 2.13 % | 126.28 | 107.11 | **15.18 %** | 22.39 |
-| Gradient Boosting | 67.61 | 65.74 | 2.77 % | 135.30 | 107.92 | **20.23 %** | 2.09 |
-| XGBoost (GPU) | 60.81 | 59.03 | 2.93 % | 121.18 | 98.97 | **18.33 %** | **0.67** |
+The generator created 42 days of 15-minute observations for 24 sensors and 90 planned
+events across LA and SF: **96,768 rows**, of which **4,599 (4.8%)** carry a generator-injected
+event effect above 0.05. The study completed **108 controlled fits in 619.3 seconds**:
+Random Forest [1] and XGBoost [2] × three forward seven-day folds × three seeds × six treatments.
+Within a fold and seed, every treatment uses identical rows, target, model family, and fixed
+hyperparameters. Seeds are averaged before inference and are not counted as independent
+observations.
 
-**Significance** (`scripts.run_stats`, rolling-origin CV, 4 folds × 3 seeds, RF; gap =
-A − A+ so positive = A+ better):
+Event-affected MAE by treatment (vehicles per 15-minute interval):
 
-- EVENT-AFFECTED: mean MAE gap **+16.61** [+13.19, +19.68], t-p < 0.0001,
-  Wilcoxon p = 0.0005 → **SIGNIFICANT**.
-- OVERALL: mean MAE gap **+1.41** [+1.10, +1.67], t-p < 0.0001, Wilcoxon p = 0.0005 →
-  **SIGNIFICANT**.
-- Every one of the 12 fold × seed cells improves, with near-identical values across seeds
-  within each fold — the gain is neither estimator randomness nor a single lucky period.
+| Treatment | Added event information | Random Forest | XGBoost |
+|---|---|---:|---:|
+| A | None | 126.58 | 123.66 |
+| A+window | Event-window indicator | 114.22 | 107.14 |
+| A+spatiotemporal | Distance and time-to-event | 109.60 | 104.68 |
+| A+attendance | Attendance-exposure features | 105.67 | 100.53 |
+| **A+raw** | **All predeclared raw event features** | **103.79** | **97.06** |
+| A+placebo | All metadata, event dates shifted +7 days | 126.50 | 123.85 |
 
-**Interpretation for the write-up.**
-- The event feature helps **on event-affected rows across all three model families**
-  (+15.2 % / +20.2 % / +18.3 % MAE reduction), and the RF gain is statistically significant
-  under the same CV × seeds protocol that returns a null on real data (§4.1b). The
-  hypothesis holds and is robust to model choice.
-- Overall gains are small (2–3 %) *by construction*: only ~6 % of rows are event-affected,
-  so the aggregate dilutes a locally large effect. This motivates the
-  event-affected-subset lens (§2.8).
-- The headline RF run (`metrics.json`) also shows the reliability metrics moving the right
-  way on event rows: p95 absolute error 444 → 383, event-subset R² 0.914 → 0.933.
-- XGBoost is both **most accurate on event rows and fastest** (0.67 vs 22.4 ms/1k),
-  supporting the response-time criterion and giving a concrete CPU-vs-GPU discussion point.
-- These are effect sizes *on synthetic data* with a generator-injected effect; treat them
-  as evidence the mechanism works, not as real-world magnitudes (§5). The matched shape
-  (window, event density, flow scale) makes the synthetic-vs-real contrast in §4.1b a
-  controlled comparison rather than an apples-to-oranges one.
+The ablation pattern is monotonic in this run: the window alone helps, spatial/temporal and
+attendance information help more, and A+raw has the lowest event-period MAE for both model
+families. The date placebo performs approximately like traffic-only A, while correct event
+timing reduces overall MAE relative to the placebo by 1.098 for Random Forest and 0.823 for
+XGBoost. This supports the mechanism being tied to event timing rather than merely adding
+event-shaped columns.
 
-Artifacts (kept separate from the real-data results): `media/results/synthetic/`
-(`benchmark.json`, `metrics.json`, `stats.json`) and `media/figures/synthetic/` — including
-the three ground-truth-only figures (`event_effect_hist`, `error_vs_event_effect`,
-`event_window_sensor`) that cannot be produced on real data (§4.1c).
+Uncertainty is based on paired city-day blocks with seeds averaged first. For event-affected
+periods there are **23 city-day blocks across 18 distinct days**:
+
+- Random Forest: mean paired A − A+raw MAE gap **+19.54**, stratified day-bootstrap interval
+  **[+12.47, +26.57]**.
+- XGBoost: mean paired A − A+raw MAE gap **+22.21**, stratified day-bootstrap interval
+  **[+14.10, +30.31]**.
+- Overall (42 city-day blocks across 21 days): Random Forest **+1.36**
+  **[+0.76, +2.09]**; XGBoost **+1.25** **[+0.70, +1.89]**.
+
+These intervals support improvement *under the synthetic generator's assumptions*. They do
+not establish a real-world event effect or validate the assumed synthetic effect magnitude.
+The appropriate claim is narrower: two different tree-model families recover the injected
+signal, correct event dates outperform a +7-day placebo, and richer raw event information
+progressively improves recovery. The real-data study determines the thesis conclusion.
+
+Traceable artifacts are under `runs/sample-20260716T165613Z/`: `run_manifest.json` records
+the input/configuration checksums, counts, versions, seed, hardware, timestamp, and Git commit;
+`results/sample_results.json` contains both model families; and model-specific statistics are
+in `results/stats_random_forest_flow.json` and `results/stats_xgboost_flow.json`.
 
 ### 4.1b Real-data results (headline) — a null result, honestly reported
 

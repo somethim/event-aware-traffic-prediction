@@ -11,7 +11,12 @@ venv/
 data/raw/*
 data/processed/*
 data/processed_inputs/*
+data/processed_synthetic/*
+data/processed_inputs_synthetic/*
 models/*
+runs/*
+media/results/*
+media/figures/*
 
 # Secrets
 .env

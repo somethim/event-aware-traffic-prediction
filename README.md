@@ -11,16 +11,16 @@ that the **only** variable is the event information:
 | Run | Model | Features | Purpose |
 |-----|-------|----------|---------|
 | A  | Traffic model (baseline)    | temporal + historical/lag flow | control |
-| A+ | Traffic model (event-aware) | A's features **+ event-impact score** | treatment |
+| A+raw | Traffic model (event-aware) | A's features **+ raw planned-event features** | primary treatment |
 
-The event-impact score itself is produced by a second model:
+The learned event-impact score is retained only as a diagnostic ablation:
 
 | Model | Input | Output |
 |-------|-------|--------|
 | B (event impact) | event metadata relative to a sensor & time (distance, expected popularity, time-to-event, …) | a scalar "event pressure" score |
 
-So the flow is: **B → feeds A+**, and we compare **A vs A+** on an identical
-test set. This directly tests the thesis hypothesis: including event-based data
+The predeclared comparison is **A vs A+raw** on identical rows and forward test
+blocks. This tests whether including event-based data
 (location, time, expected popularity) improves accuracy, *especially* during
 event-driven congestion.
 
@@ -30,7 +30,8 @@ event-driven congestion.
   the event-impact model. It is a strong, low-tuning baseline for tabular data
   and — importantly for the thesis — exposes **feature importances**, so you can
   quantify how much the event feature actually contributes.
-- Swappable to **Gradient Boosting** via `config/config.yaml` (`model.type`).
+- **XGBoost** is the robustness model. Slow scikit-learn Gradient Boosting is excluded from the
+  claim-bearing run.
 - Both A and A+ **must** use the same `model.type` — the comparison is only valid
   if the model is held constant and the feature set is the only difference.
 
@@ -81,40 +82,18 @@ uv fetches it automatically.
 # 1. install deps into a managed venv
 uv sync --extra dev
 
-# 2. build the dataset (real by default: auto-fetches PeMS from Drive + setlist.fm events)
-uv run python -m scripts.build_real_dataset      # needs SETLISTFM_API_KEY in .env
-#    (or use the controlled synthetic testbed instead: set data.source: synthetic in config)
+# 2. fast implementation/mechanism validation (21 days, 12 sensors, 24 events)
+uv run python -m scripts.run_synthetic_smoke --config config/synthetic.yaml
 
-# 3. run EVERYTHING: experiment matrix (all models × conditions) + headline pipeline + figures
-uv run python -m scripts.run_all         # fills docs/thesis-notes.md + media/
-#    HEAVY: minutes on synthetic, but plan for HOURS on the real dataset (~1M rows; the
-#    sklearn gradient_boosting cells dominate). Run it detached so it survives the terminal:
-#      nohup uv run python -m scripts.run_all > run_all.log 2>&1 &
-# ...or the individual pieces:
-uv run python -m src.pipeline.prepare            # cached feature matrix
-uv run python -m src.pipeline.train_baseline     # Model A
-uv run python -m src.pipeline.train_event_model  # Model B  (writes event_impact_score)
-uv run python -m src.pipeline.train_event_aware  # Model A+
-uv run python -m src.pipeline.compare            # metrics + plots -> media/
-
-# benchmark EVERY model (RF, GB, XGBoost, ...) — each run as A and A+ — and compare
-uv run python -m scripts.run_benchmark           # -> media/results/benchmark.json + media/figures/
-
-# statistical rigor: rolling-origin CV x seeds + significance test on the A->A+ gap
-uv run python -m scripts.run_stats               # -> media/results/stats.json
-
-# generate all thesis figures (matplotlib) into media/figures/
-uv run python -m scripts.run_visuals
-
-# run the full experiment matrix (split × normalize × model) -> table in docs/thesis-notes.md
-uv run python -m scripts.run_experiments
+# 3. claim-bearing real study; requires SETLISTFM_API_KEY and may run overnight
+uv run python -m scripts.run_real_thesis --config config/real.yaml
 
 # tests
 uv run pytest
 ```
 
-Outputs land under **`media/`**: metrics JSON in `media/results/`, PNG figures in
-`media/figures/`. (`data/` holds only inputs + intermediate parquet; both are gitignored.)
+Outputs land under **`runs/<run_id>/`**. `runs/latest-verified` changes only after all acceptance
+checks pass. Generated data, models, results, and figures are gitignored and rebuilt as needed.
 
 ### Models & GPU
 

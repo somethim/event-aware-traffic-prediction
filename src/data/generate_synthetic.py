@@ -146,7 +146,7 @@ def _city_flow(rng, city: dict, timeline, radius_km: float, sid_offset: int, eid
 
 def generate(cfg: dict | None = None, seed: int | None = None) -> None:
     cfg = cfg or CFG
-    seed = CFG["seed"] if seed is None else seed
+    seed = cfg["seed"] if seed is None else seed
     rng = np.random.default_rng(seed)
     dcfg = cfg["data"]
     radius = cfg["features"]["event_radius_km"]

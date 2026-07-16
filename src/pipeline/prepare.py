@@ -11,9 +11,11 @@ import pandas as pd
 from ..config import CFG, PROCESSED_DIR
 from ..data.load import load_events, load_flow, load_sensors
 from ..features.build_features import event_features, traffic_features
+from ..provenance import validate_manifest, write_manifest
 from .preprocess import assign_split, normalize_per_sensor
 
 DATASET_FILE = PROCESSED_DIR / "dataset.parquet"
+DATASET_MANIFEST_FILE = PROCESSED_DIR / "dataset_manifest.json"
 
 
 def build_feature_frame(cfg: dict | None = None) -> pd.DataFrame:
@@ -40,6 +42,7 @@ def prepare(cfg: dict | None = None) -> pd.DataFrame:
     df = normalize_per_sensor(df, cfg)
 
     df.to_parquet(DATASET_FILE, index=False)
+    write_manifest(DATASET_MANIFEST_FILE, cfg)
     split = cfg["model"]["split"]
     detail = (
         f"time (test={split['time_size']})"
@@ -55,9 +58,15 @@ def prepare(cfg: dict | None = None) -> pd.DataFrame:
     return df
 
 
-def load_dataset() -> pd.DataFrame:
+def load_dataset(cfg: dict | None = None) -> pd.DataFrame:
     if not DATASET_FILE.exists():
-        return prepare()
+        return prepare(cfg)
+    if cfg is not None:
+        if not DATASET_MANIFEST_FILE.exists():
+            raise RuntimeError("stale cache rejected: dataset manifest is missing")
+        import json
+
+        validate_manifest(json.loads(DATASET_MANIFEST_FILE.read_text()), cfg)
     df = pd.read_parquet(DATASET_FILE)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df

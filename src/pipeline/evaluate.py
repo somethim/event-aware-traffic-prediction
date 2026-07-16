@@ -23,13 +23,26 @@ import pandas as pd
 from scipy import stats
 
 from ..config import CFG, RESULTS_DIR, target_column
-from ..features.build_features import traffic_feature_columns
+from ..data.load import load_events, load_flow, load_sensors
+from ..features.build_features import (
+    EVENT_FEATURE_COLUMNS,
+    event_features,
+    shift_events_placebo,
+    traffic_feature_columns,
+)
 from ..models.traffic_model import build_model
 from .preprocess import normalize_per_sensor
 from .prepare import build_feature_frame
-from .train_event_model import fit_event_score
 
 EVENT_EFFECT_THRESHOLD = 0.05
+SAMPLE_TREATMENTS = {
+    "A": [],
+    "A+window": ["in_event_window"],
+    "A+spatiotemporal": ["nearest_event_km", "hours_to_next_event"],
+    "A+attendance": ["sum_attendance_exposed", "max_attendance_exposed"],
+    "A+raw": EVENT_FEATURE_COLUMNS,
+    "A+placebo": [f"placebo__{c}" for c in EVENT_FEATURE_COLUMNS],
+}
 
 
 def rolling_origin_folds(n_times: int, n_folds: int, test_frac: float) -> list[tuple[int, int]]:
@@ -53,28 +66,24 @@ def _event_mask(df: pd.DataFrame) -> np.ndarray:
     return (df["in_event_window"] == 1).to_numpy()
 
 
-def _fit_event_score(fold: pd.DataFrame, cfg: dict) -> np.ndarray:
-    """Model B on this fold: out-of-fold scores for train rows, train-fit for the test block."""
-    return np.asarray(fit_event_score(fold, cfg)[0], dtype=float)
-
-
 def _run_fold_seed(fold: pd.DataFrame, cfg: dict, feats: list[str], tgt: str) -> dict:
-    """Train A and A+ on this fold with cfg's seed; return per-row abs errors on the test block."""
+    """Fit every treatment with identical rows, split, model family, seed, and parameters."""
     train, test = fold[fold["is_train"]], fold[~fold["is_train"]]
     scale = test["flow_scale"].to_numpy()
     y_true = test[tgt].to_numpy()
-
-    model_a = build_model(cfg)
-    model_a.fit(train[feats], train["target"])
-    err_a = np.abs(y_true - model_a.predict(test[feats]) * scale)
-
-    feats_plus = feats + ["event_impact_score"]
-    model_ap = build_model(cfg)
-    model_ap.fit(train[feats_plus], train["target"])
-    err_ap = np.abs(y_true - model_ap.predict(test[feats_plus]) * scale)
-
+    errors = {}
+    for treatment, extra in SAMPLE_TREATMENTS.items():
+        columns = feats + extra
+        model = build_model(cfg)
+        model.fit(train[columns], train["target"])
+        errors[treatment] = np.abs(y_true - model.predict(test[columns]) * scale)
     ev = _event_mask(test)
-    return {"err_a": err_a, "err_ap": err_ap, "event": ev}
+    return {
+        "errors": errors,
+        "event": ev,
+        "city": test["city"].to_numpy(),
+        "day": test["timestamp"].dt.strftime("%Y-%m-%d").to_numpy(),
+    }
 
 
 def _paired_stats(gap: np.ndarray, alpha: float, n_boot: int, seed: int) -> dict:
@@ -99,10 +108,31 @@ def _paired_stats(gap: np.ndarray, alpha: float, n_boot: int, seed: int) -> dict
         "ci_high": float(hi),
         "ttest_p": t_p,
         "wilcoxon_p": w_p,
-        # Significant only when the t-test clears alpha and the bootstrap CI excludes 0.
-        "significant": bool(t_p == t_p and t_p < alpha and lo > 0),
+        "interval_supports_improvement": bool(len(gap) >= 10 and lo > 0),
+        "inference_unit": "paired city-day blocks",
         "n_cells": int(len(gap)),
     }
+
+
+def _stratified_day_stats(day: pd.DataFrame, alpha: float, n_boot: int, seed: int) -> dict:
+    """Paired city-day bootstrap, resampling days independently within each city."""
+    gap = day["mae_a"] - day["mae_ap"]
+    rng = np.random.default_rng(seed)
+    groups = [g.to_numpy() for _, g in gap.groupby(day["city"], sort=True)]
+    boots = np.array(
+        [
+            np.concatenate([rng.choice(g, len(g), replace=True) for g in groups]).mean()
+            for _ in range(n_boot)
+        ]
+    )
+    result = _paired_stats(gap.to_numpy(), alpha, max(1, min(n_boot, 100)), seed)
+    result["ci_low"], result["ci_high"] = map(
+        float, np.percentile(boots, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    )
+    result["interval_supports_improvement"] = bool(len(gap) >= 10 and result["ci_low"] > 0)
+    result["n_days"] = int(day["day"].nunique())
+    result["n_city_days"] = int(len(day))
+    return result
 
 
 def evaluate(cfg: dict | None = None) -> dict:
@@ -110,53 +140,103 @@ def evaluate(cfg: dict | None = None) -> dict:
     ecfg = cfg.get("evaluation", {})
     seeds = ecfg.get("seeds", [cfg["seed"]])
     n_folds = int(ecfg.get("cv", {}).get("n_folds", 4))
-    test_frac = float(ecfg.get("cv", {}).get("test_frac", 0.15))
+    cv_cfg = ecfg.get("cv", {})
+    test_frac = float(cv_cfg.get("test_frac", 0.15))
     alpha = float(ecfg.get("alpha", 0.05))
     n_boot = int(ecfg.get("n_bootstrap", 2000))
 
     tgt = target_column(cfg)
     feats = traffic_feature_columns(cfg)
     base = build_feature_frame(cfg).sort_values(["sensor_id", "timestamp"]).reset_index(drop=True)
+    placebo = event_features(
+        load_flow(), shift_events_placebo(load_events()), load_sensors(), cfg
+    ).rename(columns={c: f"placebo__{c}" for c in EVENT_FEATURE_COLUMNS})
+    base = base.merge(
+        placebo[["sensor_id", "timestamp"] + [f"placebo__{c}" for c in EVENT_FEATURE_COLUMNS]],
+        on=["sensor_id", "timestamp"],
+        how="left",
+    )
     times = pd.DatetimeIndex(base["timestamp"].unique()).sort_values()
+    if "test_days" in cv_cfg:
+        test_len = int(pd.Timedelta(days=float(cv_cfg["test_days"])) / (times[1] - times[0]))
+        test_frac = test_len / len(times)
     folds = rolling_origin_folds(len(times), n_folds, test_frac)
 
     cells: list[dict] = []
     row_err_a_evt: list[np.ndarray] = []
     row_err_ap_evt: list[np.ndarray] = []
+    day_frames: list[pd.DataFrame] = []
     for fi, (tr_end, te_end) in enumerate(folds):
         train_end, test_end = times[tr_end], times[te_end - 1]
         fold = base[base["timestamp"] <= test_end].copy()
         fold["is_train"] = fold["timestamp"] < train_end
         fold = normalize_per_sensor(fold, cfg)
-        fold["event_impact_score"] = _fit_event_score(fold, cfg)
-
         for seed in seeds:
             c = copy.deepcopy(cfg)
             c["seed"] = seed
             r = _run_fold_seed(fold, c, feats, tgt)
             evt = r["event"]
+            errors = r["errors"]
             cell = {
                 "fold": fi,
                 "seed": seed,
-                "n_test": int(len(r["err_a"])),
+                "n_test": int(len(errors["A"])),
                 "n_event": int(evt.sum()),
-                "mae_a_all": float(r["err_a"].mean()),
-                "mae_ap_all": float(r["err_ap"].mean()),
-                "mae_a_event": float(r["err_a"][evt].mean()) if evt.any() else float("nan"),
-                "mae_ap_event": float(r["err_ap"][evt].mean()) if evt.any() else float("nan"),
+                "mae_a_all": float(errors["A"].mean()),
+                "mae_ap_all": float(errors["A+raw"].mean()),
+                "mae_placebo_all": float(errors["A+placebo"].mean()),
+                "mae_a_event": float(errors["A"][evt].mean()) if evt.any() else float("nan"),
+                "mae_ap_event": (float(errors["A+raw"][evt].mean()) if evt.any() else float("nan")),
+                "mae_placebo_event": (
+                    float(errors["A+placebo"][evt].mean()) if evt.any() else float("nan")
+                ),
             }
+            for treatment in SAMPLE_TREATMENTS:
+                key = treatment.lower().replace("+", "_plus_").replace("-", "_")
+                cell[f"mae_{key}_all"] = float(errors[treatment].mean())
+                cell[f"mae_{key}_event"] = (
+                    float(errors[treatment][evt].mean()) if evt.any() else float("nan")
+                )
             cells.append(cell)
+            day_frames.append(
+                pd.DataFrame(
+                    {
+                        "fold": fi,
+                        "seed": seed,
+                        "city": r["city"],
+                        "day": r["day"],
+                        "event": evt,
+                        "err_a": errors["A"],
+                        "err_ap": errors["A+raw"],
+                    }
+                )
+            )
             if evt.any():
-                row_err_a_evt.append(r["err_a"][evt])
-                row_err_ap_evt.append(r["err_ap"][evt])
+                row_err_a_evt.append(errors["A"][evt])
+                row_err_ap_evt.append(errors["A+raw"][evt])
             print(
                 f"[stats] fold {fi} seed {seed}: "
-                f"event MAE A={cell['mae_a_event']:.3f} A+={cell['mae_ap_event']:.3f}"
+                f"event MAE A={cell['mae_a_event']:.3f} A+raw={cell['mae_ap_event']:.3f}"
             )
 
     cell_df = pd.DataFrame(cells)
-    gap_event = (cell_df["mae_a_event"] - cell_df["mae_ap_event"]).dropna().to_numpy()
-    gap_overall = (cell_df["mae_a_all"] - cell_df["mae_ap_all"]).to_numpy()
+    # Seeds measure stability; inference uses one seed-averaged observation per fold.
+    fold_df = cell_df.groupby("fold", as_index=False).mean(numeric_only=True)
+    row_days = pd.concat(day_frames, ignore_index=True)
+    # Average stochastic seeds first. The inferential observations are paired city-days.
+    day_seed = row_days.groupby(["fold", "seed", "city", "day"], as_index=False).agg(
+        mae_a=("err_a", "mean"), mae_ap=("err_ap", "mean")
+    )
+    day_overall = day_seed.groupby(["fold", "city", "day"], as_index=False)[
+        ["mae_a", "mae_ap"]
+    ].mean()
+    event_rows = row_days[row_days["event"]]
+    event_day_seed = event_rows.groupby(["fold", "seed", "city", "day"], as_index=False).agg(
+        mae_a=("err_a", "mean"), mae_ap=("err_ap", "mean")
+    )
+    day_event = event_day_seed.groupby(["fold", "city", "day"], as_index=False)[
+        ["mae_a", "mae_ap"]
+    ].mean()
 
     # Secondary check: a pooled row-level paired test on event rows. The n is large, but the rows
     # aren't independent, so treat it as supporting evidence only.
@@ -173,13 +253,34 @@ def evaluate(cfg: dict | None = None) -> dict:
         "seeds": list(seeds),
         "n_folds": len(folds),
         "alpha": alpha,
-        "event_affected": _paired_stats(gap_event, alpha, n_boot, cfg["seed"]),
-        "overall": _paired_stats(gap_overall, alpha, n_boot, cfg["seed"]),
+        "event_affected": _stratified_day_stats(day_event, alpha, n_boot, cfg["seed"]),
+        "overall": _stratified_day_stats(day_overall, alpha, n_boot, cfg["seed"]),
+        "ablations": {
+            treatment: {
+                "mean_mae_all": float(
+                    fold_df[
+                        f"mae_{treatment.lower().replace('+', '_plus_').replace('-', '_')}_all"
+                    ].mean()
+                ),
+                "mean_mae_event": float(
+                    fold_df[
+                        f"mae_{treatment.lower().replace('+', '_plus_').replace('-', '_')}_event"
+                    ].mean()
+                ),
+            }
+            for treatment in SAMPLE_TREATMENTS
+        },
+        "placebo": {
+            "mean_real_minus_placebo_mae": float(
+                (fold_df["mae_ap_all"] - fold_df["mae_placebo_all"]).mean()
+            ),
+            "interpretation": "negative favors true event dates",
+        },
         "pooled_row_wilcoxon_p_event": pooled_p,
         "cells": cells,
     }
 
-    out = RESULTS_DIR / "stats.json"
+    out = RESULTS_DIR / f"stats_{cfg['model']['type']}_{tgt}.json"
     out.write_text(json.dumps(results, indent=2))
     _print_summary(results)
     print(f"\n[stats] wrote {out}")
@@ -188,17 +289,34 @@ def evaluate(cfg: dict | None = None) -> dict:
 
 def _print_summary(r: dict) -> None:
     ev, ov = r["event_affected"], r["overall"]
-    print("\n=== A -> A+ significance (rolling-origin CV x seeds) ===")
+    print("\n=== A -> A+raw paired city-day evidence ===")
     print(
         f"target={r['target']}  model={r['model_type']}  folds={r['n_folds']}  seeds={r['seeds']}"
     )
     for name, blk in (("EVENT-AFFECTED", ev), ("OVERALL", ov)):
-        verdict = "SIGNIFICANT" if blk["significant"] else "not significant"
+        verdict = (
+            "interval supports improvement"
+            if blk["interval_supports_improvement"]
+            else "interval does not support a directional claim"
+        )
         print(
             f"{name:<15} mean MAE gap={blk['mean_mae_gap']:+.3f} "
             f"[{blk['ci_low']:+.3f}, {blk['ci_high']:+.3f}]  "
-            f"t-p={blk['ttest_p']:.4f}  wilcoxon-p={blk['wilcoxon_p']:.4f}  -> {verdict}"
+            f"city-days={blk['n_city_days']} days={blk['n_days']}  -> {verdict}"
         )
+    placebo = r["placebo"]
+    print(
+        f"PLACEBO         A+raw minus +7-day-placebo MAE="
+        f"{placebo['mean_real_minus_placebo_mae']:+.3f} "
+        f"({placebo['interpretation']})"
+    )
+    print(
+        "ABLATIONS       "
+        + ", ".join(
+            f"{name}={values['mean_mae_event']:.2f}" for name, values in r["ablations"].items()
+        )
+        + "  [event MAE]"
+    )
 
 
 if __name__ == "__main__":

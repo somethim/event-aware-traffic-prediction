@@ -93,6 +93,24 @@ EVENT_FEATURE_COLUMNS = [
     "pre_event_pressure",
 ]
 
+# Predeclared treatments. Attribution columns are deliberately absent: they are reporting
+# metadata and must never become model inputs.
+EVENT_TREATMENTS = {
+    "A": [],
+    "A+window": ["in_event_window"],
+    "A+spatiotemporal": ["nearest_event_km", "hours_to_next_event"],
+    "A+attendance": ["sum_attendance_exposed", "max_attendance_exposed"],
+    "A+raw": EVENT_FEATURE_COLUMNS,
+    "A+B": ["event_impact_score"],
+}
+
+
+def shift_events_placebo(events: pd.DataFrame, days: int = 7) -> pd.DataFrame:
+    """Shift event timing exactly while preserving IDs, locations, and all metadata."""
+    out = events.copy()
+    out["start_time"] = pd.to_datetime(out["start_time"]) + pd.Timedelta(days=days)
+    return out
+
 
 def event_features(
     flow: pd.DataFrame, events: pd.DataFrame, sensors: pd.DataFrame, cfg: dict | None = None
@@ -118,6 +136,9 @@ def event_features(
     t_h = hours_since(t, t[0])
     n_t = len(t_h)
 
+    events = events.reset_index(drop=True).copy()
+    if "event_id" not in events:
+        events["event_id"] = [f"event-{i}" for i in range(len(events))]
     ev_lat = events["lat"].to_numpy(dtype=float)
     ev_lon = events["lon"].to_numpy(dtype=float)
     ev_dur = events["duration_h"].to_numpy(dtype=float)
@@ -137,6 +158,9 @@ def event_features(
         pre_pressure = np.zeros(n_t)
         nearest_km = np.full(n_t, radius)
         hours_to_next = np.full(n_t, 999.0)
+        dominant_id = np.full(n_t, None, dtype=object)
+        dominant_phase = np.full(n_t, "none", dtype=object)
+        dominant_weight = np.zeros(n_t)
 
         for j in np.where(rel)[0]:
             s, e = ev_start_h[j], ev_end_h[j]
@@ -152,6 +176,21 @@ def event_features(
             sum_att += window * att * decay
             max_att = np.maximum(max_att, window * att * decay)
             nearest_km = np.where(window & (d < nearest_km), d, nearest_km)
+
+            weight = window * att * decay
+            dominates = weight > dominant_weight
+            approach_phase = (t_h >= s - lead) & (t_h < s)
+            during_phase = (t_h >= s) & (t_h <= e)
+            departure_phase = (t_h > e) & (t_h <= e + post)
+            phase = np.where(
+                approach_phase,
+                "approach",
+                np.where(during_phase, "during", np.where(departure_phase, "departure", "none")),
+            )
+            event_id = str(events.at[j, "event_id"])
+            dominant_id = np.where(dominates, event_id, dominant_id)
+            dominant_phase = np.where(dominates, phase, dominant_phase)
+            dominant_weight = np.maximum(dominant_weight, weight)
 
             # Anticipatory pressure lives only in the [start-lead, start] approach window and
             # ramps from 0 at `lead` hours out to 1 at the start, scaled by attendance and
@@ -177,6 +216,8 @@ def event_features(
                     "hours_to_next_event": np.clip(hours_to_next, 0, 72),
                     "in_event_window": in_win,
                     "pre_event_pressure": pre_pressure,
+                    "dominant_event_id": dominant_id,
+                    "event_phase": dominant_phase,
                 }
             )
         )

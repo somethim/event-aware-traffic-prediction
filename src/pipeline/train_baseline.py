@@ -17,7 +17,7 @@ def main(cfg: dict | None = None) -> dict:
 
     print(
         f"[A/baseline] MAE={metrics['MAE']:.2f}  RMSE={metrics['RMSE']:.2f}  "
-        f"MAPE={metrics['MAPE']:.2f}%  R2={metrics['R2']:.3f}"
+        f"WAPE={metrics['WAPE']:.2f}%  R2={metrics['R2']:.3f}"
     )
     print(f"[A/baseline] saved {MODEL_FILE.name} and {PRED_FILE.name}")
     return metrics
