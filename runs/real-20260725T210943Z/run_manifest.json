@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "source_profile": "real",
+  "config_path": "/home/arbi/Projects/event-aware-traffic-prediction/config/real.yaml",
+  "config_checksum": "dac659f8f61eda678f0eaa12ea1d97c8480627bb1b5db273f7888a18c130b320",
+  "input_checksums": {
+    "flow.parquet": "64a63f6c606f620dc82ee5202232c148d04f049a1c9b88f234e8310eeb8f3f56",
+    "events.parquet": "53b74eb0cf3f7f831e50cfdce513fbbe8ae4bd45bdf72e8d97fe12387e4c0303",
+    "sensors.parquet": "59263ee67f83c15ec9d6d774a008bcb47a5db590850cfd1b80c7fa1d7be19641"
+  },
+  "date_range": [
+    "2026-05-11 00:00:00",
+    "2026-07-11 23:45:00"
+  ],
+  "counts": {
+    "rows": 5678208,
+    "events": 164,
+    "sensors": 954,
+    "healthy_sensors_by_city": {
+      "LA": 473,
+      "SF": 481
+    }
+  },
+  "target_availability": {
+    "flow": 1314263,
+    "speed": 1314263,
+    "occupancy": 1314263
+  },
+  "seed": 42,
+  "git_commit": "a262951976b8b6211790ac1348136ad379e2a5aa",
+  "dependencies": {
+    "numpy": "2.5.1",
+    "pandas": "3.0.3",
+    "scikit-learn": "1.9.0",
+    "xgboost": "3.3.0",
+    "pyarrow": "25.0.0"
+  },
+  "hardware": {
+    "platform": "Linux-7.1.4-arch1-1-x86_64-with-glibc2.43",
+    "processor": "",
+    "python": "3.12.13"
+  },
+  "build_timestamp": "2026-07-26T21:02:01.927565+00:00"
+}

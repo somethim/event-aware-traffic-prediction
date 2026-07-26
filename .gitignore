@@ -15,6 +15,11 @@ data/processed_synthetic/*
 data/processed_inputs_synthetic/*
 models/*
 runs/*
+# Keep the compact, claim-bearing result bundle reproducible without committing raw data,
+# fitted models, or every exploratory run.
+!runs/latest-verified
+!runs/real-20260725T210943Z/
+!runs/real-20260725T210943Z/**
 media/results/*
 media/figures/*
 
